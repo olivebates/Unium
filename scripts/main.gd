@@ -1,21 +1,35 @@
 extends Control
 
+const CelebrationLines = preload("res://scripts/celebration_lines.gd")
+
 const BG := Color("0c1219")
 const PANEL := Color("141e28")
 const TEXT := Color("e8eee9")
 const MUTED := Color("88979e")
 const ACCENT := Color("b6ead3")
+const MENU_PAGE_SIZE := 30
+const MENU_MAX_COLUMNS := 15
 
 var store := LevelStore.new()
 var screen := "menu"
 var current_level := 1
 var board: PuzzleBoard
+var board_panel: PanelContainer
+var background_rect: ColorRect
+var background_tween: Tween
+var palette_tween: Tween
+var palette_text := Color.WHITE
+var palette_button := Color.BLACK
+var menu_hovered_level := 0
 var content: VBoxContainer
 var overlay: Control
 var toast: Label
 var toast_timer := 0.0
 var transition_id := 0
 var menu_page := 0
+var menu_rows: VBoxContainer
+var menu_cards: Array[Button] = []
+var menu_columns := 0
 var pressed_keys: Dictionary = {}
 var chord_active := false
 var pending_undo := false
@@ -26,29 +40,75 @@ var redo_stack: Array = []
 var stroke_before: Dictionary = {}
 var brush := 1
 var editor_message: Label
+var editor_mode_hint: Label
+var editor_controls: VBoxContainer
+var editor_playtesting := false
 var width_input: SpinBox
 var height_input: SpinBox
+var editor_number_input: SpinBox
 var brush_buttons: Array[Button] = []
 var restoring_editor := false
 var return_screen := "menu"
 var saved_path: Array = []
 var color_mode := false
+var color_previous_board_locked := false
 var color_level := 1
 var color_draft := Color.WHITE
+var line_draft := Color.WHITE
+var line_custom_draft := false
+var copied_area_colors: Dictionary = {}
+var color_selecting_line := false
+var color_picker_loading := false
+var color_picker: ColorPicker
+var color_preview: PuzzleBoard
+var color_tile_button: Button
+var color_line_button: Button
+var color_feedback: Label
+var color_group_label: Label
+var color_paste_button: Button
 
 func _ready() -> void:
 	RenderingServer.set_default_clear_color(BG)
 	_build_theme()
+	resized.connect(_update_menu_columns)
 	show_menu()
+
+func _update_menu_columns() -> void:
+	if not is_instance_valid(menu_rows):
+		return
+	var columns := mini(MENU_MAX_COLUMNS, maxi(1, int((size.x - 88 + 12) / 76)))
+	menu_rows.custom_minimum_size.x = maxf(0.0, size.x - 104.0)
+	if columns == menu_columns and menu_rows.get_child_count() > 0:
+		return
+	menu_columns = columns
+	for row in menu_rows.get_children():
+		for card in row.get_children():
+			row.remove_child(card)
+		menu_rows.remove_child(row)
+		row.queue_free()
+	for first in range(0, menu_cards.size(), columns):
+		var row := HBoxContainer.new()
+		row.alignment = BoxContainer.ALIGNMENT_CENTER
+		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_theme_constant_override("separation", 12)
+		menu_rows.add_child(row)
+		for index in range(first, mini(first + columns, menu_cards.size())):
+			row.add_child(menu_cards[index])
 
 func _build_theme() -> void:
 	var theme_resource := Theme.new()
 	theme_resource.default_font_size = 16
+	theme_resource.set_type_variation("PrimaryButton", "Button")
 	theme_resource.set_color("font_color", "Label", TEXT)
 	theme_resource.set_color("font_color", "Button", TEXT)
 	theme_resource.set_color("font_hover_color", "Button", Color.WHITE)
 	theme_resource.set_color("font_pressed_color", "Button", TEXT)
 	theme_resource.set_constant("outline_size", "Label", 0)
+	theme_resource.set_color("font_shadow_color", "Label", Color(0, 0, 0, 0.22))
+	theme_resource.set_constant("shadow_offset_x", "Label", 1)
+	theme_resource.set_constant("shadow_offset_y", "Label", 1)
+	theme_resource.set_color("font_outline_color", "Button", Color(0, 0, 0, 0.22))
+	theme_resource.set_constant("outline_size", "Button", 1)
 	theme_resource.set_constant("separation", "VBoxContainer", 14)
 	theme_resource.set_constant("separation", "HBoxContainer", 14)
 	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
@@ -69,32 +129,67 @@ func _build_theme() -> void:
 		theme_resource.set_stylebox(state, "Button", style)
 	theme = theme_resource
 
+func _apply_ui_palette(color: Color) -> void:
+	_apply_ui_colors(PuzzleBoard.text_color(color), PuzzleBoard.button_color(color))
+
+func _apply_ui_colors(light: Color, dark: Color) -> void:
+	palette_text = light
+	palette_button = dark
+	for kind in ["Label", "Button", "LineEdit", "SpinBox"]:
+		theme.set_color("font_color", kind, light)
+	for state in ["font_hover_color", "font_pressed_color", "font_focus_color", "font_disabled_color"]:
+		theme.set_color(state, "Button", light)
+	_style_buttons("Button", dark, light)
+	_style_buttons("PrimaryButton", PuzzleBoard.balanced_color(dark.h, 0.50, 0.12), light)
+
+func _style_buttons(kind: String, base: Color, text_color: Color) -> void:
+	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
+		var fill := base
+		if state == "hover":
+			fill = PuzzleBoard.balanced_color(base.h, base.s, PuzzleBoard.luminance(base) + 0.012)
+		elif state == "pressed":
+			fill = PuzzleBoard.balanced_color(base.h, base.s, maxf(0.02, PuzzleBoard.luminance(base) - 0.012))
+		var style := box(fill, 12)
+		style.content_margin_left = 20
+		style.content_margin_right = 20
+		style.content_margin_top = 12
+		style.content_margin_bottom = 12
+		if state == "focus":
+			style.bg_color = Color.TRANSPARENT
+			style.border_color = text_color
+			style.set_border_width_all(2)
+		theme.set_stylebox(state, kind, style)
+
+func _animate_ui_palette(target_color: Color, duration: float, from_text: Color, from_button: Color) -> void:
+	if palette_tween and palette_tween.is_running():
+		palette_tween.kill()
+	var target_text := PuzzleBoard.text_color(target_color)
+	var target_button := PuzzleBoard.button_color(target_color)
+	_apply_ui_colors(from_text, from_button)
+	palette_tween = create_tween()
+	palette_tween.tween_method(func(progress: float):
+		_apply_ui_colors(from_text.lerp(target_text, progress), from_button.lerp(target_button, progress))
+	, 0.0, 1.0, duration).set_trans(Tween.TRANS_SINE)
+
 func box(color: Color, radius: int = 16) -> StyleBoxFlat:
 	var style := StyleBoxFlat.new()
 	style.bg_color = color
 	style.set_corner_radius_all(radius)
 	return style
 
-func label(text: String, font_size: int = 16, color: Color = TEXT) -> Label:
+func label(text: String, font_size: int = 16, _color: Color = TEXT) -> Label:
 	var node := Label.new()
 	node.text = text
 	node.add_theme_font_size_override("font_size", font_size)
-	node.add_theme_color_override("font_color", color)
 	return node
 
 func button(text: String, action: Callable, primary: bool = false) -> Button:
 	var node := Button.new()
 	node.text = text
+	if primary:
+		node.theme_type_variation = "PrimaryButton"
 	node.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	node.pressed.connect(action)
-	if primary:
-		var style := box(ACCENT, 12)
-		style.content_margin_left = 24
-		style.content_margin_right = 24
-		style.content_margin_top = 14
-		style.content_margin_bottom = 14
-		node.add_theme_stylebox_override("normal", style)
-		node.add_theme_color_override("font_color", BG)
 	return node
 
 func spacer(parent: Control) -> Control:
@@ -105,12 +200,28 @@ func spacer(parent: Control) -> Control:
 
 func _shell() -> void:
 	transition_id += 1
+	if background_tween and background_tween.is_running():
+		background_tween.kill()
+	background_tween = null
+	if palette_tween and palette_tween.is_running():
+		palette_tween.kill()
+	palette_tween = null
 	for child in get_children():
 		remove_child(child)
 		child.queue_free()
 	board = null
+	board_panel = null
+	menu_rows = null
+	menu_cards.clear()
+	menu_columns = 0
+	background_rect = null
 	toast = null
 	overlay = null
+	background_rect = ColorRect.new()
+	background_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	background_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	add_child(background_rect)
+	_set_background_for_level(editor_level if screen == "editor" else (current_level if screen == "play" else (menu_hovered_level if menu_hovered_level > 0 else store.frontier())))
 	var margins := MarginContainer.new()
 	margins.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	for side in ["left", "right"]:
@@ -121,36 +232,36 @@ func _shell() -> void:
 	content = VBoxContainer.new()
 	content.add_theme_constant_override("separation", 22)
 	margins.add_child(content)
-	var header := HBoxContainer.new()
-	content.add_child(header)
-	header.add_child(label("a f t e r g l o w", 28, ACCENT))
-	var separator := HSeparator.new()
-	separator.modulate = Color(1, 1, 1, 0.16)
-	content.add_child(separator)
+	if screen == "menu":
+		var header := HBoxContainer.new()
+		content.add_child(header)
+		header.add_child(label("H e a r t h l i n e", 28))
+		spacer(header)
+		header.add_child(button("Play level %d   →" % store.frontier(), func(): play_level(store.frontier()), true))
+		var separator := HSeparator.new()
+		separator.modulate = Color(1, 1, 1, 0.16)
+		content.add_child(separator)
 
 func show_menu() -> void:
 	screen = "menu"
 	color_mode = false
 	_shell()
-	var menu_actions := HBoxContainer.new()
-	content.add_child(menu_actions)
-	spacer(menu_actions)
-	menu_actions.add_child(button("Play level %02d   →" % store.frontier(), func(): play_level(store.frontier()), true))
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	content.add_child(scroll)
-	var grid := GridContainer.new()
-	grid.columns = mini(12, maxi(1, int((size.x - 88 + 12) / 76)))
-	grid.add_theme_constant_override("h_separation", 12)
-	grid.add_theme_constant_override("v_separation", 12)
-	scroll.add_child(grid)
+	var rows := VBoxContainer.new()
+	menu_rows = rows
+	rows.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	rows.add_theme_constant_override("separation", 12)
+	scroll.add_child(rows)
 	var unlocked := store.frontier()
-	menu_page = clampi(menu_page, 0, int((unlocked - 1) / 24))
-	for number in range(menu_page * 24 + 1, mini(unlocked + 1, menu_page * 24 + 25)):
-		grid.add_child(_level_card(number))
-	if unlocked > 24:
+	menu_page = clampi(menu_page, 0, int((unlocked - 1) / MENU_PAGE_SIZE))
+	for number in range(menu_page * MENU_PAGE_SIZE + 1, mini(unlocked + 1, (menu_page + 1) * MENU_PAGE_SIZE + 1)):
+		menu_cards.append(_level_card(number))
+	_update_menu_columns()
+	if unlocked > MENU_PAGE_SIZE:
 		var pages := HBoxContainer.new()
 		content.add_child(pages)
 		var previous := button("← Previous", func(): menu_page -= 1; show_menu())
@@ -160,57 +271,89 @@ func show_menu() -> void:
 		pages.add_child(label("Page %d" % (menu_page + 1), 14, MUTED))
 		spacer(pages)
 		var next := button("Next →", func(): menu_page += 1; show_menu())
-		next.disabled = (menu_page + 1) * 24 >= unlocked
+		next.disabled = (menu_page + 1) * MENU_PAGE_SIZE >= unlocked
 		pages.add_child(next)
 
 func _level_card(number: int) -> Button:
 	var card := button("", func(): play_level(number))
+	card.mouse_entered.connect(func():
+		if screen == "menu" and not color_mode:
+			menu_hovered_level = number
+			_set_background_for_level(number, true)
+	)
 	card.custom_minimum_size = Vector2(64, 64)
 	card.size_flags_horizontal = Control.SIZE_FILL
 	card.tooltip_text = "Play level %d" % number
 	var preview := TextureRect.new()
-	preview.position = Vector2(4, 4)
-	preview.size = Vector2(56, 43)
+	preview.position = Vector2.ZERO
+	preview.size = Vector2(64, 64)
 	preview.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	preview.stretch_mode = TextureRect.STRETCH_SCALE
 	preview.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	card.add_child(preview)
 	# The thumbnail is a live offscreen screenshot using the actual board renderer.
 	var viewport := SubViewport.new()
-	viewport.size = Vector2i(240, 200)
-	viewport.transparent_bg = true
+	viewport.size = Vector2i(240, 240)
 	viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 	viewport.gui_disable_input = true
 	preview.add_child(viewport)
 	var miniature := PuzzleBoard.new()
-	miniature.size = Vector2(240, 200)
+	miniature.size = Vector2(240, 240)
+	miniature.thumbnail_mode = true
 	viewport.add_child(miniature)
-	miniature.configure(store.get_level(number), store.get_color(number))
+	miniature.configure(store.get_level(number), store.get_color(number), store.get_line_color(number))
 	miniature.locked = true
 	miniature.set_process_input(false)
 	preview.texture = viewport.get_texture()
-	var number_label := label("%02d" % number, 11)
-	number_label.position = Vector2(7, 47)
+	var number_label := label("%d" % number, 11)
+	number_label.position = Vector2(5, 45)
 	number_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	number_label.add_theme_color_override("font_color", PuzzleBoard.text_color(store.get_color(number)))
+	_outline_label(number_label)
 	card.add_child(number_label)
 	if store.completed.get(str(number), false):
-		var checkmark := label("✓", 13, store.get_color(number))
-		checkmark.position = Vector2(46, 46)
+		var checkmark := label("✓", 18)
+		checkmark.position = Vector2(41, 39)
 		checkmark.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		checkmark.add_theme_color_override("font_color", PuzzleBoard.text_color(store.get_color(number)))
+		_outline_label(checkmark)
 		card.add_child(checkmark)
+	var outline := Panel.new()
+	outline.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	outline.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var outline_style := box(Color.TRANSPARENT, 9)
+	outline_style.border_color = PuzzleBoard.tile_color(0, store.get_color(number))
+	outline_style.set_border_width_all(2)
+	outline.add_theme_stylebox_override("panel", outline_style)
+	card.add_child(outline)
 	return card
 
+func _outline_label(node: Label) -> void:
+	node.add_theme_constant_override("outline_size", 3)
+	node.add_theme_color_override("font_outline_color", Color.BLACK)
+
 func play_level(number: int, restore: Array = []) -> void:
+	var previous_text := palette_text
+	var previous_button := palette_button
+	var previous_level := -1
+	if screen == "play":
+		previous_level = current_level
+	elif screen == "menu":
+		previous_level = menu_hovered_level if menu_hovered_level > 0 else store.frontier()
+	var previous_background: Color = background_rect.color if is_instance_valid(background_rect) else (PuzzleBoard.background_color(store.get_color(previous_level)) if previous_level > 0 else BG)
+	var changing_set := previous_level > 0 and LevelStore.group_start(previous_level) != LevelStore.group_start(number)
+	var tint := store.get_color(number)
+	var fade_duration := 0.60 if changing_set else 0.30
 	current_level = number
 	screen = "play"
 	color_mode = false
 	_shell()
 	var level := store.get_level(number)
-	var tint := store.get_color(number)
-	content.add_child(label("Level %02d" % number, 38))
+	content.add_child(label("Level %d" % number, 38))
 	var panel := PanelContainer.new()
+	board_panel = panel
 	panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	panel.add_theme_stylebox_override("panel", box(PANEL, 24))
+	panel.add_theme_stylebox_override("panel", box(PuzzleBoard.background_color(tint), 24))
 	content.add_child(panel)
 	var play_area := Control.new()
 	play_area.custom_minimum_size = Vector2(340, 320)
@@ -218,25 +361,60 @@ func play_level(number: int, restore: Array = []) -> void:
 	board = PuzzleBoard.new()
 	board.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	play_area.add_child(board)
-	board.configure(level, tint)
+	board.configure(level, tint, store.get_line_color(number))
 	board.path = restore.duplicate()
 	board.refresh()
 	board.solved.connect(_complete_level)
-	var reset_button := button("↻ Reset line", func(): board.clear_path())
-	var reset_style := box(Color("283846"), 10)
-	reset_button.add_theme_stylebox_override("normal", reset_style)
-	reset_button.anchor_left = 1.0
-	reset_button.anchor_top = 1.0
-	reset_button.anchor_right = 1.0
-	reset_button.anchor_bottom = 1.0
-	reset_button.offset_left = -152
-	reset_button.offset_top = -62
-	reset_button.offset_right = -16
-	reset_button.offset_bottom = -16
-	play_area.add_child(reset_button)
 	var controls := HBoxContainer.new()
 	content.add_child(controls)
 	controls.add_child(button("← All puzzles", show_menu))
+	controls.add_child(button("↻ Reset line", func(): board.clear_path()))
+	if changing_set or not previous_background.is_equal_approx(PuzzleBoard.background_color(tint)):
+		_animate_level_background(previous_background, PuzzleBoard.background_color(tint), fade_duration)
+	if changing_set or not previous_text.is_equal_approx(PuzzleBoard.text_color(tint)):
+		_animate_ui_palette(tint, fade_duration, previous_text, previous_button)
+
+func _set_board_tint(color: Color, selected_line: Color = Color.TRANSPARENT) -> void:
+	if not palette_text.is_equal_approx(PuzzleBoard.text_color(color)):
+		_animate_ui_palette(color, 0.20, palette_text, palette_button)
+	if background_tween and background_tween.is_running():
+		background_tween.kill()
+	if is_instance_valid(board):
+		board.tint = color
+		board.stroke_color = selected_line if selected_line.a > 0.0 else store.get_line_color(editor_level if screen == "editor" else current_level, color)
+		board.refresh()
+	if is_instance_valid(board_panel):
+		board_panel.add_theme_stylebox_override("panel", box(PuzzleBoard.background_color(color), 24 if screen == "play" else 22))
+	if is_instance_valid(background_rect):
+		background_rect.color = PuzzleBoard.background_color(color)
+
+func _set_background_for_level(number: int, animate: bool = false) -> void:
+	var level_color := store.get_color(number)
+	if animate:
+		_animate_ui_palette(level_color, 0.30, palette_text, palette_button)
+	else:
+		if palette_tween and palette_tween.is_running():
+			palette_tween.kill()
+		_apply_ui_palette(level_color)
+	if is_instance_valid(background_rect):
+		var target := PuzzleBoard.background_color(level_color)
+		if background_tween and background_tween.is_running():
+			background_tween.kill()
+		if animate and background_rect.color != target:
+			background_tween = create_tween()
+			background_tween.tween_property(background_rect, "color", target, 0.30).set_trans(Tween.TRANS_SINE)
+		else:
+			background_rect.color = target
+
+func _animate_level_background(previous: Color, target: Color, duration: float = 0.60) -> void:
+	if previous == target or not is_instance_valid(background_rect):
+		return
+	background_rect.color = previous
+	var panel_style := box(previous, 24)
+	board_panel.add_theme_stylebox_override("panel", panel_style)
+	background_tween = create_tween().set_parallel(true)
+	background_tween.tween_property(background_rect, "color", target, duration).set_trans(Tween.TRANS_SINE)
+	background_tween.tween_property(panel_style, "bg_color", target, duration).set_trans(Tween.TRANS_SINE)
 
 func _complete_level() -> void:
 	var result := store.mark_complete(current_level)
@@ -258,15 +436,20 @@ func _complete_level() -> void:
 	var message := VBoxContainer.new()
 	message.add_theme_constant_override("separation", 16)
 	center_container.add_child(message)
-	for item in [["✦", 64, tint], ["Beautifully connected.", 40, TEXT], ["Congratulations — level %02d complete!" % current_level, 18, tint], ["Take a breath. Your next puzzle is on its way.", 15, MUTED]]:
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	var praise: String = CelebrationLines.LINES[rng.randi_range(0, CelebrationLines.LINES.size() - 1)].trim_suffix(".") + "!"
+	var celebration_lines := [["✦", 64, tint], ["Level %d complete!" % current_level, 40, TEXT], [praise, 18, tint]]
+	for index in range(celebration_lines.size()):
+		var item: Array = celebration_lines[index]
 		var text_label := label(item[0], item[1], item[2])
+		if index == 2:
+			text_label.add_theme_color_override("font_color", PuzzleBoard.tile_color(0, tint))
 		text_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		message.add_child(text_label)
 	layer.modulate.a = 0
 	var fade := create_tween()
 	fade.tween_property(layer, "modulate:a", 1.0, 0.35)
-	var rng := RandomNumberGenerator.new()
-	rng.randomize()
 	for i in range(48):
 		var spark := ColorRect.new()
 		spark.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -295,18 +478,32 @@ func _input(event: InputEvent) -> void:
 	var only_color_keys := _only_keys([KEY_SHIFT, KEY_Z, KEY_I])
 	var editor_chord: bool = event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_O) and only_editor_keys
 	var color_chord: bool = event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_I) and only_color_keys
-	if (editor_chord or color_chord) and not chord_active:
+	var previous_chord: bool = screen == "play" and not color_mode and event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_LEFT) and _only_keys([KEY_SHIFT, KEY_Z, KEY_LEFT])
+	var next_chord: bool = screen == "play" and not color_mode and event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_RIGHT) and _only_keys([KEY_SHIFT, KEY_Z, KEY_RIGHT])
+	var unlock_chord: bool = event.ctrl_pressed and not event.shift_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_M) and _only_keys([KEY_CTRL, KEY_Z, KEY_M])
+	var reset_chord: bool = event.ctrl_pressed and not event.shift_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_N) and _only_keys([KEY_CTRL, KEY_Z, KEY_N])
+	if (editor_chord or color_chord or previous_chord or next_chord or unlock_chord or reset_chord) and event.pressed and not chord_active:
 		chord_active = true
 		pending_undo = false
 		get_viewport().set_input_as_handled()
 		if editor_chord:
 			_toggle_editor()
-		else:
+		elif color_chord:
 			_toggle_color_editor()
+		elif previous_chord and current_level > 1:
+			play_level(current_level - 1)
+		elif next_chord:
+			play_level(current_level + 1)
+		elif unlock_chord or reset_chord:
+			_change_completion(unlock_chord)
 		return
-	if not editor_chord and not color_chord:
+	if not editor_chord and not color_chord and not previous_chord and not next_chord and not unlock_chord and not reset_chord:
 		chord_active = false
 	if screen == "editor" and not color_mode:
+		if key == KEY_SPACE and event.pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed:
+			_toggle_editor_playtest()
+			get_viewport().set_input_as_handled()
+			return
 		if key == KEY_Z and event.pressed and event.ctrl_pressed and not event.shift_pressed and not event.alt_pressed and not pressed_keys.has(KEY_I):
 			# Defer until release to distinguish Ctrl+Z from Ctrl+Z+I.
 			pending_undo = true
@@ -318,6 +515,17 @@ func _input(event: InputEvent) -> void:
 		elif key == KEY_Y and event.pressed and event.ctrl_pressed and not event.shift_pressed and not event.alt_pressed:
 			_editor_redo()
 			get_viewport().set_input_as_handled()
+
+func _change_completion(unlock: bool) -> void:
+	var result := store.complete_first(99) if unlock else store.reset_completion_to_first()
+	if result != OK:
+		_show_toast("Progress could not be saved: " + error_string(result))
+		return
+	if screen == "menu":
+		menu_hovered_level = 0
+		show_menu()
+	else:
+		_show_toast("Levels 1–99 unlocked." if unlock else "Progress reset to level 2.")
 
 func _only_keys(allowed: Array) -> bool:
 	for key in pressed_keys:
@@ -332,8 +540,6 @@ func _notification(what: int) -> void:
 		pending_undo = false
 
 func _toggle_editor() -> void:
-	if screen == "play" and is_instance_valid(board) and board.locked and not color_mode:
-		return
 	if color_mode:
 		_toggle_color_editor()
 	if screen == "editor":
@@ -343,8 +549,8 @@ func _toggle_editor() -> void:
 			show_menu()
 		return
 	return_screen = screen
-	saved_path = board.path.duplicate() if is_instance_valid(board) else []
-	editor_level = current_level if screen == "play" else store.frontier()
+	saved_path = board.path.duplicate() if is_instance_valid(board) and not board.locked else []
+	editor_level = current_level if screen == "play" else (menu_hovered_level if menu_hovered_level > 0 else store.frontier())
 	editor_data = store.get_level(editor_level)
 	undo_stack.clear()
 	redo_stack.clear()
@@ -352,39 +558,58 @@ func _toggle_editor() -> void:
 
 func _show_editor() -> void:
 	screen = "editor"
+	editor_playtesting = false
 	_shell()
 	var title_row := HBoxContainer.new()
 	content.add_child(title_row)
 	title_row.add_child(label("Level workshop", 34))
 	spacer(title_row)
-	title_row.add_child(label("SHIFT + Z + O TO RETURN", 12, MUTED))
+	var title_hints := VBoxContainer.new()
+	title_hints.alignment = BoxContainer.ALIGNMENT_CENTER
+	title_row.add_child(title_hints)
+	editor_mode_hint = label("BUILD MODE · SPACE TO PLAYTEST", 12, ACCENT)
+	editor_mode_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	title_hints.add_child(editor_mode_hint)
+	var leave_hint := label("SHIFT + Z + O TO RETURN", 12, MUTED)
+	leave_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	title_hints.add_child(leave_hint)
 	var workspace := HBoxContainer.new()
 	workspace.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	content.add_child(workspace)
 	var panel := PanelContainer.new()
+	board_panel = panel
 	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	panel.add_theme_stylebox_override("panel", box(PANEL, 22))
+	panel.add_theme_stylebox_override("panel", box(PuzzleBoard.background_color(store.get_color(editor_level)), 22))
 	workspace.add_child(panel)
 	board = PuzzleBoard.new()
 	board.custom_minimum_size = Vector2(320, 330)
 	board.editing = true
 	panel.add_child(board)
-	board.configure(editor_data, store.get_color(editor_level))
+	board.configure(editor_data, store.get_color(editor_level), store.get_line_color(editor_level))
+	board.solved.connect(_editor_playtest_solved)
 	board.paint_started.connect(func(): stroke_before = editor_data.duplicate(true))
 	board.cell_painted.connect(_paint_cell)
+	board.light_painted.connect(_paint_light_cell)
 	board.paint_finished.connect(_finish_stroke)
 	var controls_scroll := ScrollContainer.new()
 	controls_scroll.custom_minimum_size.x = 245
 	controls_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	workspace.add_child(controls_scroll)
 	var controls := VBoxContainer.new()
+	editor_controls = controls
 	controls.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	controls.add_theme_constant_override("separation", 9)
 	controls_scroll.add_child(controls)
 	controls.add_child(label("SAVE AS LEVEL", 12, MUTED))
 	var number_input := _spin(editor_level, 1, 100000)
+	editor_number_input = number_input
 	controls.add_child(number_input)
-	number_input.value_changed.connect(func(value: float): editor_level = int(value); board.tint = store.get_color(editor_level); board.refresh())
+	number_input.value_changed.connect(func(value: float):
+		if restoring_editor:
+			return
+		editor_level = int(value)
+		_set_board_tint(store.get_color(editor_level))
+	)
 	controls.add_child(button("Load level", func():
 		_finish_stroke()
 		_record_edit()
@@ -392,6 +617,8 @@ func _show_editor() -> void:
 		_sync_editor()
 		editor_message.text = "Loaded level %d." % editor_level
 	))
+	controls.add_child(button("Insert level here", _insert_editor_level))
+	controls.add_child(button("Delete saved level", _delete_editor_level))
 	controls.add_child(label("GRID DIMENSIONS", 12, MUTED))
 	var dimensions := HBoxContainer.new()
 	controls.add_child(dimensions)
@@ -422,6 +649,42 @@ func _show_editor() -> void:
 	controls.add_child(editor_message)
 	content.add_child(label("Neutral tiles never flip. Custom layouts are saved exactly as drawn; solvability is up to you.", 13, MUTED))
 
+func _toggle_editor_playtest() -> void:
+	if screen != "editor" or not is_instance_valid(board):
+		return
+	board._end()
+	board._end_light()
+	_finish_stroke()
+	editor_playtesting = not editor_playtesting
+	board.clear_path()
+	board.editing = not editor_playtesting
+	_set_editor_tools_enabled(not editor_playtesting)
+	if editor_playtesting:
+		editor_mode_hint.text = "PLAYTEST MODE · SPACE TO BUILD"
+		editor_message.text = "Draw a line to test this layout."
+	else:
+		_sync_editor()
+		editor_mode_hint.text = "BUILD MODE · SPACE TO PLAYTEST"
+		editor_message.text = "Returned to building. Test line cleared."
+
+func _set_editor_tools_enabled(enabled: bool) -> void:
+	if not is_instance_valid(editor_controls):
+		return
+	var pending: Array[Node] = [editor_controls]
+	while not pending.is_empty():
+		var node: Node = pending.pop_back()
+		if node is Button:
+			(node as Button).disabled = not enabled
+		elif node is SpinBox:
+			(node as SpinBox).editable = enabled
+		for child in node.get_children():
+			pending.append(child)
+
+func _editor_playtest_solved() -> void:
+	if editor_playtesting:
+		editor_mode_hint.text = "SOLVED · SPACE TO BUILD"
+		editor_message.text = "Solved! Press Space to return to building."
+
 func _spin(value: float, minimum: float, maximum: float) -> SpinBox:
 	var node := SpinBox.new()
 	node.min_value = minimum
@@ -439,6 +702,7 @@ func _set_brush(value: int) -> void:
 
 func _reset_all_white() -> void:
 	board._end()
+	board._end_light()
 	_finish_stroke()
 	if not editor_data.tiles.has(1) and not editor_data.tiles.has(2):
 		editor_message.text = "The board is already all white."
@@ -456,10 +720,16 @@ func _record_edit() -> void:
 	redo_stack.clear()
 
 func _paint_cell(cell: int) -> void:
-	if editor_data.tiles[cell] == brush:
+	_paint_value(cell, brush)
+
+func _paint_light_cell(cell: int) -> void:
+	_paint_value(cell, 0)
+
+func _paint_value(cell: int, value: int) -> void:
+	if editor_data.tiles[cell] == value:
 		return
-	editor_data.tiles[cell] = brush
-	board.tiles[cell] = brush
+	editor_data.tiles[cell] = value
+	board.tiles[cell] = value
 	board.refresh()
 
 func _finish_stroke() -> void:
@@ -486,28 +756,98 @@ func _resize_editor() -> void:
 
 func _sync_editor() -> void:
 	restoring_editor = true
+	editor_number_input.value = editor_level
 	width_input.value = editor_data.width
 	height_input.value = editor_data.height
 	restoring_editor = false
-	board.configure(editor_data, store.get_color(editor_level))
+	board.configure(editor_data, store.get_color(editor_level), store.get_line_color(editor_level))
+	_set_board_tint(store.get_color(editor_level))
 
 func _editor_undo() -> void:
 	_finish_stroke()
 	if undo_stack.is_empty():
 		return
-	redo_stack.append(editor_data.duplicate(true))
-	editor_data = undo_stack.pop_back()
-	_sync_editor()
+	var previous: Dictionary = undo_stack.pop_back()
+	if previous.get("_structure", false):
+		redo_stack.append(_structural_snapshot())
+		_restore_structure(previous)
+	else:
+		redo_stack.append(editor_data.duplicate(true))
+		editor_data = previous
+		_sync_editor()
 	editor_message.text = "Undid the last edit."
 
 func _editor_redo() -> void:
 	_finish_stroke()
 	if redo_stack.is_empty():
 		return
-	undo_stack.append(editor_data.duplicate(true))
-	editor_data = redo_stack.pop_back()
-	_sync_editor()
+	var next: Dictionary = redo_stack.pop_back()
+	if next.get("_structure", false):
+		undo_stack.append(_structural_snapshot())
+		_restore_structure(next)
+	else:
+		undo_stack.append(editor_data.duplicate(true))
+		editor_data = next
+		_sync_editor()
 	editor_message.text = "Redid the last edit."
+
+func _structural_snapshot() -> Dictionary:
+	return {"_structure": true, "levels": store.levels.duplicate(true), "completed": store.completed.duplicate(true), "editor_level": editor_level, "editor_data": editor_data.duplicate(true), "current_level": current_level, "saved_path": saved_path.duplicate()}
+
+func _restore_structure(snapshot: Dictionary) -> void:
+	store.levels = snapshot.levels.duplicate(true)
+	store.completed = snapshot.completed.duplicate(true)
+	var result := store.save_levels()
+	if result == OK:
+		result = store.save_progress()
+	editor_level = int(snapshot.editor_level)
+	current_level = int(snapshot.current_level)
+	saved_path = snapshot.saved_path.duplicate()
+	editor_data = snapshot.editor_data.duplicate(true)
+	_sync_editor()
+	if result != OK:
+		editor_message.text = "Could not save restored levels: " + error_string(result)
+
+func _insert_editor_level() -> void:
+	board._end()
+	board._end_light()
+	_finish_stroke()
+	if not editor_data.tiles.has(1):
+		editor_message.text = "Add at least one dark tile before inserting."
+		return
+	var before := _structural_snapshot()
+	var result := store.insert_level(editor_level, editor_data)
+	if result != OK:
+		editor_message.text = "Insert failed: " + error_string(result)
+		return
+	undo_stack.append(before)
+	redo_stack.clear()
+	if current_level >= editor_level:
+		current_level += 1
+	saved_path.clear()
+	_sync_editor()
+	editor_message.text = "Inserted level %d. Later custom levels moved up." % editor_level
+
+func _delete_editor_level() -> void:
+	board._end()
+	board._end_light()
+	_finish_stroke()
+	if not store.levels.has(str(editor_level)):
+		editor_message.text = "Level %d has no saved layout to delete." % editor_level
+		return
+	var before := _structural_snapshot()
+	var result := store.delete_level(editor_level)
+	if result != OK:
+		editor_message.text = "Delete failed: " + error_string(result)
+		return
+	undo_stack.append(before)
+	redo_stack.clear()
+	if current_level > editor_level:
+		current_level -= 1
+	saved_path.clear()
+	editor_data = store.get_level(editor_level)
+	_sync_editor()
+	editor_message.text = "Deleted level %d. Later custom levels moved down." % editor_level
 
 func _save_editor() -> void:
 	_finish_stroke()
@@ -531,9 +871,8 @@ func _toggle_color_editor() -> void:
 			overlay.queue_free()
 			overlay = null
 		if is_instance_valid(board):
-			board.locked = false
-			board.tint = store.get_color(editor_level if screen == "editor" else current_level)
-			board.refresh()
+			board.locked = color_previous_board_locked
+			_set_board_tint(store.get_color(editor_level if screen == "editor" else current_level))
 		if screen == "menu":
 			show_menu()
 		elif screen == "play":
@@ -542,10 +881,12 @@ func _toggle_color_editor() -> void:
 	color_mode = true
 	transition_id += 1
 	if is_instance_valid(board):
+		color_previous_board_locked = board.locked
 		board._end()
+		board._end_light()
 		board.locked = true
-	color_level = editor_level if screen == "editor" else (current_level if screen == "play" else store.frontier())
-	color_draft = store.get_color(color_level)
+	color_level = editor_level if screen == "editor" else (current_level if screen == "play" else (menu_hovered_level if menu_hovered_level > 0 else store.frontier()))
+	color_selecting_line = false
 	overlay = Control.new()
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(overlay)
@@ -566,13 +907,15 @@ func _toggle_color_editor() -> void:
 	panel.add_theme_stylebox_override("panel", style)
 	center_container.add_child(panel)
 	var controls := VBoxContainer.new()
-	controls.custom_minimum_size.x = 380
+	controls.custom_minimum_size.x = 700
 	panel.add_child(controls)
-	controls.add_child(label("Make it your hue.", 30))
+	controls.add_child(label("Choose your colors.", 30))
 	controls.add_child(label("SHIFT + Z + I TO RETURN", 12, MUTED))
 	var picker := ColorPicker.new()
+	color_picker = picker
 	picker.edit_alpha = false
-	picker.color = color_draft
+	picker.custom_minimum_size.x = 400
+	picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	picker.can_add_swatches = false
 	picker.color_modes_visible = false
 	picker.sliders_visible = false
@@ -581,24 +924,114 @@ func _toggle_color_editor() -> void:
 	var number_input := _spin(color_level, 1, 100000)
 	controls.add_child(label("LEVEL NUMBER", 12, MUTED))
 	controls.add_child(number_input)
-	controls.add_child(picker)
-	var feedback := label("Light tiles use this hue; dark tiles use its shade.", 13, MUTED)
-	controls.add_child(feedback)
-	number_input.value_changed.connect(func(value: float):
-		color_level = int(value)
-		color_draft = store.get_color(color_level)
-		picker.color = color_draft
-	)
-	picker.color_changed.connect(func(color: Color):
+	color_group_label = label("", 13, MUTED)
+	controls.add_child(color_group_label)
+	var transfer_row := HBoxContainer.new()
+	controls.add_child(transfer_row)
+	transfer_row.add_child(button("Copy colors", _copy_area_colors))
+	color_paste_button = button("Paste colors", _paste_area_colors)
+	color_paste_button.disabled = copied_area_colors.is_empty()
+	transfer_row.add_child(color_paste_button)
+	var palette_row := HBoxContainer.new()
+	controls.add_child(palette_row)
+	palette_row.add_child(picker)
+	var preview_column := VBoxContainer.new()
+	preview_column.custom_minimum_size.x = 285
+	palette_row.add_child(preview_column)
+	preview_column.add_child(label("LIVE PREVIEW", 12, MUTED))
+	color_preview = PuzzleBoard.new()
+	color_preview.custom_minimum_size = Vector2(285, 145)
+	color_preview.size = Vector2(285, 145)
+	color_preview.thumbnail_mode = true
+	preview_column.add_child(color_preview)
+	color_preview.configure({"width": 3, "height": 1, "tiles": [1, 0, 1]}, color_draft, line_draft)
+	color_preview.path = [0, 1, 2]
+	color_preview.refresh()
+	color_preview.locked = true
+	color_preview.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	color_preview.set_process_input(false)
+	color_tile_button = button("Tile hue", func(): _select_color_target(false))
+	preview_column.add_child(color_tile_button)
+	color_line_button = button("Line color", func(): _select_color_target(true))
+	preview_column.add_child(color_line_button)
+	preview_column.add_child(button("Use suggested line color", _reset_line_draft))
+	color_feedback = label("Tile brightness stays fixed. Choose any line color.", 13, MUTED)
+	controls.add_child(color_feedback)
+	number_input.value_changed.connect(func(value: float): _load_color_drafts(int(value)))
+	picker.color_changed.connect(_color_picker_changed)
+	controls.add_child(button("Save area colors", _save_color_selection, true))
+	_load_color_drafts(color_level)
+
+func _load_color_drafts(number: int) -> void:
+	if LevelStore.group_start(number) == LevelStore.group_start(color_level) and is_instance_valid(color_preview) and not color_group_label.text.is_empty():
+		color_level = number
+		return
+	color_level = number
+	color_draft = Color.from_hsv(store.get_color(number).h, 1.0, 1.0)
+	line_custom_draft = store.line_colors.has(str(LevelStore.group_start(number)))
+	line_draft = store.get_line_color(number)
+	color_group_label.text = "Levels %d–%d share these colors." % [LevelStore.group_start(number), LevelStore.group_start(number) + 4]
+	_update_color_controls()
+
+func _select_color_target(select_line: bool) -> void:
+	color_selecting_line = select_line
+	_update_color_controls()
+
+func _update_color_controls() -> void:
+	color_picker_loading = true
+	color_picker.color = line_draft if color_selecting_line else color_draft
+	color_picker_loading = false
+	color_tile_button.theme_type_variation = "" if color_selecting_line else "PrimaryButton"
+	color_line_button.theme_type_variation = "PrimaryButton" if color_selecting_line else ""
+	_update_color_preview()
+
+func _update_color_preview() -> void:
+	if is_instance_valid(color_preview):
+		color_preview.tint = color_draft
+		color_preview.stroke_color = line_draft
+		color_preview.refresh()
+
+func _color_picker_changed(color: Color) -> void:
+	if color_picker_loading:
+		return
+	if color_selecting_line:
+		line_draft = Color(color.r, color.g, color.b)
+		line_custom_draft = true
+	else:
 		color_draft = color
-		if is_instance_valid(board) and color_level == (editor_level if screen == "editor" else current_level):
-			board.tint = color
-			board.refresh()
-	)
-	controls.add_child(button("Save level color", func():
-		var result := store.save_color(color_level, color_draft)
-		feedback.text = "Color saved for level %d." % color_level if result == OK else "Save failed: " + error_string(result)
-	, true))
+		if not line_custom_draft:
+			line_draft = PuzzleBoard.line_color(color_draft)
+	_update_color_preview()
+	if is_instance_valid(board) and LevelStore.group_start(color_level) == LevelStore.group_start(editor_level if screen == "editor" else current_level):
+		_set_board_tint(color_draft, line_draft)
+
+func _reset_line_draft() -> void:
+	line_custom_draft = false
+	line_draft = PuzzleBoard.line_color(color_draft)
+	_update_color_controls()
+	if is_instance_valid(board) and LevelStore.group_start(color_level) == LevelStore.group_start(editor_level if screen == "editor" else current_level):
+		_set_board_tint(color_draft, line_draft)
+
+func _copy_area_colors() -> void:
+	copied_area_colors = {"tile": color_draft, "line": line_draft, "custom_line": line_custom_draft}
+	color_paste_button.disabled = false
+	color_feedback.text = "Colors copied. Choose another level and paste."
+
+func _paste_area_colors() -> void:
+	if copied_area_colors.is_empty():
+		return
+	color_draft = copied_area_colors.tile
+	line_draft = copied_area_colors.line
+	line_custom_draft = copied_area_colors.custom_line
+	_update_color_controls()
+	if is_instance_valid(board) and LevelStore.group_start(color_level) == LevelStore.group_start(editor_level if screen == "editor" else current_level):
+		_set_board_tint(color_draft, line_draft)
+	color_feedback.text = "Colors pasted. Save area colors to keep them."
+
+func _save_color_selection() -> void:
+	var result := store.save_area_colors(color_level, color_draft, line_draft, line_custom_draft)
+	var start := LevelStore.group_start(color_level)
+	color_feedback.text = "Colors saved for levels %d–%d." % [start, start + 4] if result == OK else "Save failed: " + error_string(result)
 
 func _show_toast(message: String) -> void:
 	if is_instance_valid(toast):

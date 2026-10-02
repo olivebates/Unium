@@ -51,9 +51,10 @@ static func is_complete(tiles: Array, path: Array) -> bool:
 	return not path.is_empty() and path.count(path.back()) == 1 and not resolved_tiles(tiles, path).has(1)
 
 static func palette(level: int) -> Color:
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 90517 + int((level - 1) / 5) * 719
-	return Color.from_hsv(rng.randf(), rng.randf_range(0.28, 0.48), 0.94)
+	# Curated hues repeat in a predictable five-set cycle; level layout still uses its seed.
+	const HUES := [0.43, 0.56, 0.74, 0.025, 0.10] # mint, sky, lavender, coral, amber
+	var group := int((level - 1) / 5)
+	return Color.from_hsv(HUES[group % HUES.size()], 1.0, 1.0)
 
 static func generate(level: int) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
