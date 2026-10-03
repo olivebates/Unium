@@ -4,6 +4,7 @@ const CelebrationLines = preload("res://scripts/celebration_lines.gd")
 const RearrangeCard = preload("res://scripts/rearrange_card.gd")
 const MenuThumbnailJob = preload("res://scripts/menu_thumbnail_job.gd")
 const CompletedBadge = preload("res://scripts/completed_badge.gd")
+const CoinIcon = preload("res://scripts/coin_icon.gd")
 const SCREEN_TRANSITION_DURATION := 0.2
 
 const BG := Color("0c1219")
@@ -14,6 +15,7 @@ const ACCENT := Color("b6ead3")
 const UNFINISHED_OUTLINE := Color("eae345")
 const COMPLETED_CARD_OUTLINE := Color("60d98d")
 const LOCKED_HINT_OUTLINE := Color("ed5b61")
+const NO_SOLUTION_OUTLINE := Color("f05462")
 const MENU_MAX_COLUMNS := 15
 
 var store := LevelStore.new()
@@ -22,6 +24,13 @@ var current_level := 1
 var board: PuzzleBoard
 var board_panel: PanelContainer
 var completed_badge: Control
+var credit_display: HBoxContainer
+var credit_label: Label
+var hint_button: Button
+var hint_row: HBoxContainer
+var hint_stage := 0
+var hint_busy := false
+var hint_endpoints: Array[int] = []
 var background_rect: ColorRect
 var background_tween: Tween
 var palette_tween: Tween
@@ -54,6 +63,7 @@ var screen_transition: Control
 var screen_transition_tween: Tween
 var transition_new_shell: Control
 var transition_board: PuzzleBoard
+var transition_old_board: PuzzleBoard
 var transition_board_parent: Control
 var transition_hidden_card: Control
 var saved_menu: Dictionary = {}
@@ -313,12 +323,13 @@ func _finish_screen_transition() -> void:
 	screen_transition = null
 	transition_new_shell = null
 	transition_board = null
+	transition_old_board = null
 	transition_board_parent = null
 	transition_hidden_card = null
 	transition_old_shell = null
 
 func _menu_signature() -> int:
-	return hash([store.menu_unlocked(), store.completed, store.levels, store.colors])
+	return hash([store.menu_unlocked(), store.completed, store.credits, store.levels, store.colors])
 
 func _discard_saved_menu() -> void:
 	if not saved_menu.is_empty() and is_instance_valid(saved_menu.wrapper):
@@ -340,6 +351,8 @@ func _restore_saved_menu() -> void:
 	menu_hint = saved_menu.hint
 	menu_scroll = saved_menu.scroll
 	menu_columns = saved_menu.columns
+	credit_display = saved_menu.credit_display
+	credit_label = saved_menu.credit_label
 	active_menu_signature = saved_menu.signature
 	saved_menu = {}
 	_update_menu_columns()
@@ -397,9 +410,27 @@ func _start_screen_transition(outgoing: Control, kind: String, old_board: Puzzle
 	tween.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	if kind == "slide":
 		incoming.modulate.a = 1.0
-		incoming.position.x = size.x * direction
-		tween.tween_property(outgoing, "position:x", -size.x * direction, SCREEN_TRANSITION_DURATION)
-		tween.tween_property(incoming, "position:x", 0.0, SCREEN_TRANSITION_DURATION)
+		if is_instance_valid(old_board) and is_instance_valid(board):
+			var old_rect := old_board.get_global_rect()
+			var new_rect := board.get_global_rect()
+			transition_old_board = old_board
+			transition_board = board
+			transition_board_parent = board.get_parent() as Control
+			old_board.reparent(layer)
+			old_board.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+			old_board.size = old_rect.size
+			old_board.position = old_rect.position
+			board.reparent(layer)
+			board.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+			board.size = new_rect.size
+			board.position = new_rect.position + Vector2(size.x * direction, 0)
+			outgoing.hide()
+			tween.tween_property(old_board, "position:x", old_rect.position.x - size.x * direction, SCREEN_TRANSITION_DURATION)
+			tween.tween_property(board, "position:x", new_rect.position.x, SCREEN_TRANSITION_DURATION)
+		else:
+			incoming.position.x = size.x * direction
+			tween.tween_property(outgoing, "position:x", -size.x * direction, SCREEN_TRANSITION_DURATION)
+			tween.tween_property(incoming, "position:x", 0.0, SCREEN_TRANSITION_DURATION)
 	else:
 		var moving_board := board if kind == "open" else old_board
 		if kind == "close":
@@ -461,6 +492,13 @@ func _shell(restore_menu: bool = false) -> void:
 	board = null
 	board_panel = null
 	completed_badge = null
+	credit_display = null
+	credit_label = null
+	hint_button = null
+	hint_row = null
+	hint_stage = 0
+	hint_busy = false
+	hint_endpoints.clear()
 	menu_rows = null
 	menu_cards.clear()
 	menu_hint = null
@@ -497,7 +535,8 @@ func _shell(restore_menu: bool = false) -> void:
 		content.add_child(header)
 		header.add_child(label("H e a r t h l i n e", 28))
 		spacer(header)
-		header.add_child(button("Play", func(): _select_menu_level(store.frontier()), true))
+		credit_display = _credits_widget()
+		header.add_child(credit_display)
 		var separator := HSeparator.new()
 		separator.modulate = Color(1, 1, 1, 0.16)
 		content.add_child(separator)
@@ -591,8 +630,25 @@ func _animate_locked_hint(hint: PanelContainer, hovered: bool) -> void:
 func _on_locked_hint_input(event: InputEvent) -> void:
 	if screen != "menu" or not event is InputEventMouseButton or event.button_index != MOUSE_BUTTON_LEFT or not event.pressed:
 		return
-	_shake_screen()
+	_show_locked_feedback(get_global_mouse_position())
 	get_viewport().set_input_as_handled()
+
+func _show_locked_feedback(pointer: Vector2) -> void:
+	_shake_screen()
+	var feedback := label("Complete more puzzles...", 18)
+	feedback.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	feedback.add_theme_color_override("font_color", Color.WHITE)
+	feedback.add_theme_color_override("font_outline_color", Color.BLACK)
+	feedback.add_theme_constant_override("outline_size", 5)
+	feedback.z_index = 100
+	add_child(feedback)
+	feedback.reset_size()
+	var local_pointer: Vector2 = get_global_transform().affine_inverse() * pointer
+	feedback.position = Vector2(clampf(local_pointer.x - feedback.size.x * 0.5, 8, maxf(8, size.x - feedback.size.x - 8)), clampf(local_pointer.y - 24, 8, size.y - feedback.size.y - 8))
+	var tween := feedback.create_tween().set_parallel(true)
+	tween.tween_property(feedback, "position:y", feedback.position.y - 70, 1.05).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tween.tween_property(feedback, "modulate:a", 0.0, 1.05)
+	tween.finished.connect(feedback.queue_free)
 
 func _shake_screen() -> void:
 	if screen_shake_tween and screen_shake_tween.is_running():
@@ -650,7 +706,11 @@ func _level_card(number: int) -> Button:
 	outline.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	outline.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var outline_style := box(Color.TRANSPARENT, 9)
-	outline_style.border_color = COMPLETED_CARD_OUTLINE if completed else UNFINISHED_OUTLINE
+	if not store.has_solution(number):
+		outline_style.bg_color = Color("c73648", 0.24)
+		outline_style.border_color = NO_SOLUTION_OUTLINE
+	else:
+		outline_style.border_color = COMPLETED_CARD_OUTLINE if completed else UNFINISHED_OUTLINE
 	outline_style.set_border_width_all(2)
 	outline.add_theme_stylebox_override("panel", outline_style)
 	card.add_child(outline)
@@ -888,6 +948,7 @@ func play_level(number: int, restore: Array = [], navigation_direction: int = 0)
 	_finish_screen_transition()
 	var old_screen := screen
 	var old_number := current_level
+	var old_board := board
 	var source_card: Control
 	var card_rect := Rect2()
 	if screen == "menu":
@@ -899,7 +960,7 @@ func play_level(number: int, restore: Array = [], navigation_direction: int = 0)
 	var outgoing: Control = _take_outgoing_shell() if (screen == "menu" or (screen == "play" and number != current_level)) and is_instance_valid(content) else null
 	var retained_menu: Dictionary = {}
 	if outgoing and old_screen == "menu" and not rearrange_mode:
-		retained_menu = {"wrapper": outgoing, "signature": active_menu_signature, "content": content, "rows": menu_rows, "cards": menu_cards.duplicate(), "hint": menu_hint, "scroll": menu_scroll, "columns": menu_columns}
+		retained_menu = {"wrapper": outgoing, "signature": active_menu_signature, "content": content, "rows": menu_rows, "cards": menu_cards.duplicate(), "hint": menu_hint, "scroll": menu_scroll, "columns": menu_columns, "credit_display": credit_display, "credit_label": credit_label}
 	var previous_text := palette_text
 	var previous_button := palette_button
 	var previous_level := -1
@@ -918,6 +979,7 @@ func play_level(number: int, restore: Array = [], navigation_direction: int = 0)
 	var level := store.get_level(number)
 	content.add_child(label("Level %d" % number, 38))
 	_show_completed_badge()
+	_show_play_credits()
 	var panel := PanelContainer.new()
 	board_panel = panel
 	panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -941,6 +1003,23 @@ func play_level(number: int, restore: Array = [], navigation_direction: int = 0)
 	controls.add_child(button("← Previous puzzle", func(): _open_adjacent_level(-1)))
 	controls.add_child(button("↻ Reset line", func(): board.clear_path()))
 	controls.add_child(button("Next puzzle →", func(): _open_adjacent_level(1)))
+	if number != 1:
+		hint_endpoints = store.hint_endpoints(number)
+		hint_stage = store.hint_stage(number)
+		if hint_endpoints.size() == 2:
+			if hint_stage >= 1:
+				board.show_solution_hint(hint_endpoints[0], true)
+			if hint_stage >= 2:
+				board.show_solution_hint(hint_endpoints[1], false)
+		hint_row = HBoxContainer.new()
+		content.add_child(hint_row)
+		spacer(hint_row)
+		hint_button = button("", _use_hint, true)
+		hint_button.focus_mode = Control.FOCUS_NONE
+		hint_button.custom_minimum_size.x = 165
+		hint_row.add_child(hint_button)
+		spacer(hint_row)
+		_update_hint_button()
 	if changing_set or not previous_background.is_equal_approx(PuzzleBoard.background_color(tint)):
 		_animate_level_background(previous_background, PuzzleBoard.background_color(tint), fade_duration)
 	if not outgoing and (changing_set or not previous_text.is_equal_approx(PuzzleBoard.text_color(tint))):
@@ -948,9 +1027,12 @@ func play_level(number: int, restore: Array = [], navigation_direction: int = 0)
 	if outgoing:
 		outgoing_menu = retained_menu
 		var direction := navigation_direction if navigation_direction != 0 else (1 if number > old_number else -1)
-		_start_screen_transition(outgoing, "open" if old_screen == "menu" else "slide", null, card_rect, source_card, direction)
+		_start_screen_transition(outgoing, "open" if old_screen == "menu" else "slide", old_board, card_rect, source_card, direction)
 
 func _open_adjacent_level(direction: int) -> void:
+	if direction > 0 and current_level >= store.menu_unlocked():
+		_show_locked_feedback(get_global_mouse_position())
+		return
 	var next := store.adjacent_level(current_level, direction)
 	if next != current_level:
 		play_level(next, [], direction)
@@ -965,6 +1047,86 @@ func _show_completed_badge() -> void:
 	completed_badge.offset_right = -44
 	completed_badge.offset_top = 20
 	completed_badge.offset_bottom = 92
+	_position_play_credits()
+
+func _credits_widget() -> HBoxContainer:
+	var display := HBoxContainer.new()
+	display.add_theme_constant_override("separation", 8)
+	var icon := CoinIcon.new()
+	display.add_child(icon)
+	credit_label = label(str(store.credits), 24)
+	display.add_child(credit_label)
+	return display
+
+func _show_play_credits() -> void:
+	credit_display = _credits_widget()
+	active_shell.add_child(credit_display)
+	_position_play_credits()
+
+func _position_play_credits() -> void:
+	if not is_instance_valid(credit_display) or screen != "play":
+		return
+	var right := -132 if is_instance_valid(completed_badge) else -44
+	credit_display.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	credit_display.offset_left = right - 120
+	credit_display.offset_right = right
+	credit_display.offset_top = 34
+	credit_display.offset_bottom = 72
+
+func _update_credits_display() -> void:
+	if is_instance_valid(credit_label):
+		credit_label.text = str(store.credits)
+	_update_hint_button()
+
+func _update_hint_button() -> void:
+	if not is_instance_valid(hint_button):
+		return
+	hint_row.visible = hint_stage < 2
+	hint_button.text = "Hint (-1 coin)"
+	hint_button.disabled = hint_busy or store.credits <= 0 or hint_endpoints.size() != 2
+
+func _use_hint() -> void:
+	if screen != "play" or hint_busy or hint_stage >= 2:
+		return
+	if store.credits <= 0 or hint_endpoints.size() != 2:
+		return
+	var result := store.purchase_hint(current_level)
+	if result != OK:
+		_show_toast("Credit could not be spent: " + error_string(result))
+		return
+	hint_busy = true
+	_update_credits_display()
+	_shake_screen()
+	var token := transition_id
+	var cell: int = hint_endpoints[hint_stage]
+	var coin := CoinIcon.new()
+	add_child(coin)
+	coin.size = Vector2(30, 30)
+	coin.z_index = 90
+	var inverse := get_global_transform().affine_inverse()
+	coin.position = inverse * credit_display.get_global_rect().get_center() - coin.size * 0.5
+	var destination: Vector2 = inverse * (board.get_global_transform() * board.center(cell)) - coin.size * 0.5
+	var fall := coin.create_tween().set_parallel(true)
+	fall.tween_property(coin, "position", destination, 0.38).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	fall.tween_property(coin, "rotation", TAU, 0.38)
+	await get_tree().create_timer(0.39).timeout
+	if is_instance_valid(coin):
+		coin.queue_free()
+	if token != transition_id or screen != "play" or not is_instance_valid(board):
+		return
+	var hint_label := board.show_solution_hint(cell, hint_stage == 0)
+	if not is_instance_valid(hint_label):
+		hint_busy = false
+		_update_hint_button()
+		return
+	hint_stage += 1
+	hint_label.modulate.a = 0.0
+	hint_label.create_tween().tween_property(hint_label, "modulate:a", 1.0, 0.27).set_trans(Tween.TRANS_SINE)
+	await get_tree().create_timer(0.28).timeout
+	if token != transition_id or screen != "play":
+		return
+	hint_busy = false
+	_update_hint_button()
 
 func _open_adjacent_uncompleted(direction: int) -> void:
 	var next := store.adjacent_uncompleted(current_level, direction)
@@ -1015,6 +1177,7 @@ func _animate_level_background(previous: Color, target: Color, duration: float =
 
 func _complete_level() -> void:
 	var result := store.mark_complete(current_level)
+	_update_credits_display()
 	_show_completed_badge()
 	if result != OK:
 		_show_toast("Progress could not be saved: " + error_string(result))
@@ -1063,7 +1226,11 @@ func _complete_level() -> void:
 		tween.tween_property(spark, "modulate:a", 0.0, 1.4).set_delay(0.3)
 	await get_tree().create_timer(2.5).timeout
 	if token == transition_id and screen == "play":
-		_open_adjacent_uncompleted(1)
+		if current_level >= store.menu_unlocked():
+			layer.queue_free()
+			_show_locked_feedback(get_global_mouse_position())
+		else:
+			_open_adjacent_uncompleted(1)
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and menu_drag_source > 0:
@@ -1337,7 +1504,8 @@ func _set_editor_tools_enabled(enabled: bool) -> void:
 func _editor_playtest_solved() -> void:
 	if editor_playtesting:
 		editor_mode_hint.text = "SOLVED · SPACE TO BUILD"
-		editor_message.text = "Solved! Press Space to return to building."
+		var result := store.record_editor_solution(editor_level, editor_data, board.path)
+		editor_message.text = "Solved! Start and finish saved. Press Space to build." if result == OK else "Solution could not be saved: " + error_string(result)
 
 func _spin(value: float, minimum: float, maximum: float) -> SpinBox:
 	var node := SpinBox.new()
@@ -1533,11 +1701,12 @@ func _editor_redo() -> void:
 	editor_message.text = "Redid the last edit."
 
 func _structural_snapshot() -> Dictionary:
-	return {"_structure": true, "levels": store.levels.duplicate(true), "completed": store.completed.duplicate(true), "editor_level": editor_level, "editor_data": editor_data.duplicate(true), "current_level": current_level, "saved_path": saved_path.duplicate()}
+	return {"_structure": true, "levels": store.levels.duplicate(true), "completed": store.completed.duplicate(true), "hints": store.hints.duplicate(true), "editor_level": editor_level, "editor_data": editor_data.duplicate(true), "current_level": current_level, "saved_path": saved_path.duplicate()}
 
 func _restore_structure(snapshot: Dictionary) -> void:
 	store.levels = snapshot.levels.duplicate(true)
 	store.completed = snapshot.completed.duplicate(true)
+	store.hints = snapshot.hints.duplicate(true)
 	var result := store.save_levels()
 	if result == OK:
 		result = store.save_progress()

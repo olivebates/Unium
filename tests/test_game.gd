@@ -146,6 +146,8 @@ func run() -> void:
 	await process_frame
 	main.store.mirror_project = false
 	main.store.completed.clear()
+	main.store.hints.clear()
+	main.store.credits = 0
 	main.store.unlocked_through = 0
 	main.store.levels.clear()
 	main.store.colors.clear()
@@ -185,6 +187,7 @@ func run() -> void:
 		await process_frame
 	check(main.board != null, "Gameplay scene loaded")
 	check(main.completed_badge == null, "Unfinished puzzles have no completion badge")
+	check(main.hint_button == null and main.credit_label.text == "0", "Level 1 has no hint button and starts with no credits")
 	var phrases_seen := {}
 	for phrase in CelebrationLines.LINES:
 		phrases_seen[phrase] = true
@@ -215,6 +218,15 @@ func run() -> void:
 	b.configure({"width": 5, "height": 5, "tiles": all_light}, Color.WHITE)
 	check(b.tile_rects.size() == 25 and b.tile_styles.size() == 3, "Board caches tile geometry and shares three base styles")
 	check(not b.start_label.visible and not b.finish_label.visible, "Tutorial labels hide when the board has no dark tiles")
+	b.show_solution_hint(0, true)
+	b.show_solution_hint(0, false)
+	check(b.hint_start_label.position.y < b.hint_finish_label.position.y and b.hint_start_label.get_theme_color("font_color") == Color.WHITE and b.hint_finish_label.get_theme_color("font_outline_color") == Color.BLACK, "Shared start and finish tile stacks white outlined hint labels")
+	b.configure({"width": 5, "height": 5, "tiles": all_light}, Color.WHITE)
+	b.path = [6, 7, 8, 13, 18, 17, 16, 11, 6]
+	b.refresh()
+	b._begin(b.center(6))
+	check(b.path.is_empty() and not b.dragging, "Clicking the crossed start tile clears the whole line")
+	b.configure({"width": 5, "height": 5, "tiles": all_light}, Color.WHITE)
 	b._begin(b.center(5))
 	check(b.path == [5], "Mouse down starts a single-tile line")
 	b._end()
@@ -398,6 +410,8 @@ func run() -> void:
 	check(main.editor_data == before_generated and main.editor_message.text.contains("Too many crossovers"), "Impossible exact crossover request leaves the editor draft unchanged")
 	main.crossover_input.value = 0
 	main.move_input.value = 7
+	main.editor_data = {"width": 3, "height": 3, "tiles": [1, 1, 0, 0, 0, 0, 0, 0, 0]}
+	main._sync_editor()
 	var before_playtest: Dictionary = main.editor_data.duplicate(true)
 	var before_playtest_history: int = main.undo_stack.size()
 	key(main, KEY_SPACE, true)
@@ -406,14 +420,19 @@ func run() -> void:
 	key(main, KEY_LEFT, true)
 	key(main, KEY_LEFT, false)
 	check(main.editor_data == before_playtest and main.undo_stack.size() == before_playtest_history, "Arrow keys leave the draft unchanged during playtest")
-	main.board.configure({"width": 3, "height": 3, "tiles": [1, 1, 0, 0, 0, 0, 0, 0, 0]}, Color.RED)
 	main.board._begin(main.board.center(0))
 	main.board._trace(main.board.center(1))
 	check(main.board.locked and main.screen == "editor" and main.store.completed.is_empty(), "Playtest solve stays in editor without saving progress")
 	check(main.editor_mode_hint.text.begins_with("SOLVED"), "Playtest completion is visible in the editor header")
+	check(main.store.has_solution(main.editor_level) and main.store.hint_endpoints(main.editor_level) == [0, 1], "Editor playtest records solution endpoints without completing the level")
+	var editor_solution_reload := LevelStore.new()
+	check(editor_solution_reload.hint_endpoints(main.editor_level) == [0, 1], "Editor solution endpoints survive reload")
 	key(main, KEY_SPACE, true)
 	check(not main.editor_playtesting and main.board.editing and main.board.path.is_empty(), "Space returns to building and clears test line")
 	check(main.editor_data == before_playtest and main.board.tiles == before_playtest.tiles and main.undo_stack.size() == before_playtest_history, "Playtest preserves unsaved layout and undo history")
+	main._paint_value(2, 1)
+	main._save_editor()
+	check(not main.store.has_solution(main.editor_level), "Saving an edited level forgets its recorded solution")
 	key(main, KEY_SPACE, false)
 	var history_size: int = main.undo_stack.size()
 	key(main, KEY_SHIFT, true, false, true)
@@ -475,7 +494,9 @@ func run() -> void:
 	check(main.store.get_color(11) == Puzzle.palette(11), "Adjacent group stays independent")
 	check(main.store.get_line_color(11).is_equal_approx(LevelStore.DEFAULT_LINE_COLOR), "Unedited areas use the saved area-six line color")
 	check(main.store.mark_complete(1) == OK, "Progress save succeeds")
+	check(main.store.credits == 1 and main.store.mark_complete(1) == OK and main.store.credits == 1, "A level awards exactly one credit, even when replayed")
 	var reloaded := LevelStore.new()
+	check(reloaded.credits == 1, "Earned credits survive reload")
 	check(reloaded.get_level(2).tiles == custom.tiles, "Custom level survives reload")
 	check(is_equal_approx(reloaded.get_color(5).h, custom_hue.h) and reloaded.get_color(5).s > 0.99, "Group color survives reload fully saturated")
 	check(reloaded.get_line_color(5).is_equal_approx(custom_line), "Group line color survives reload")
@@ -494,6 +515,7 @@ func run() -> void:
 	main.board._trace(main.board.center(1))
 	check(main.board.locked, "Solving locks input during celebration")
 	check(main.store.completed.get("2", false), "Solving marks completed")
+	check(main.store.credits == 2 and main.credit_label.text == "2", "A newly completed level awards a visible credit")
 	check(is_instance_valid(main.completed_badge) and main.completed_badge.is_visible_in_tree() and main.completed_badge.size == Vector2(72, 72) and main.completed_badge.position.x > main.size.x - 120, "Solving shows a large completion badge at the top right")
 	var celebration_text: Array = main.find_children("", "Label", true, false).map(func(node): return node.text)
 	check("Level 2 complete!" in celebration_text and celebration_text.any(func(line): return line.ends_with("!") and (line.trim_suffix("!") + ".") in CelebrationLines.LINES), "Celebration chooses a short exclamation")
@@ -503,6 +525,23 @@ func run() -> void:
 	await create_timer(2.7).timeout
 	check(main.current_level == 3, "Celebration automatically advances")
 	check(main.completed_badge == null, "An unfinished next puzzle has no completion badge")
+	check(main.hint_button != null and main.hint_button.text == "Hint (-1 coin)" and main.hint_button.focus_mode == Control.FOCUS_NONE and not main.hint_button.disabled, "Hint shows its price and does not take Space key focus")
+	main.hint_button.pressed.emit()
+	check(main.store.credits == 1 and main.store.hint_stage(3) == 1 and main.hint_button.disabled and main.hint_busy, "Buying the first hint saves its reveal and blocks repeat clicks during animation")
+	await create_timer(0.75).timeout
+	check(main.board.hint_start_label.visible and main.board.hint_start_label.text == "Start" and main.board.hint_start_cell == main.hint_endpoints[0] and not main.hint_button.disabled, "The first purchased hint reveals the solution start")
+	main.play_level(4)
+	main.play_level(3)
+	check(main.board.hint_start_label.visible and not main.board.hint_finish_label.visible and main.hint_row.visible and main.store.credits == 1, "The first hint remains on its level after navigating away and back")
+	main.hint_button.pressed.emit()
+	check(main.store.credits == 0 and main.store.hint_stage(3) == 2 and main.hint_button.disabled and main.hint_busy, "Buying the second hint saves its reveal and spends one more credit")
+	await create_timer(0.75).timeout
+	check(main.board.hint_finish_label.visible and main.board.hint_finish_label.text == "Finish" and main.board.hint_finish_cell == main.hint_endpoints[1] and not main.hint_row.visible, "The second hint reveals the finish and removes the Hint button")
+	main.play_level(4)
+	main.play_level(3)
+	check(main.board.hint_start_label.visible and main.board.hint_finish_label.visible and not main.hint_row.visible and main.store.credits == 0, "Both hints remain visible and the button stays gone after revisiting")
+	var hint_reload := LevelStore.new()
+	check(hint_reload.hint_stage(3) == 2 and hint_reload.credits == 0, "Purchased hints and spent credits survive reload")
 	main.play_level(2)
 	await process_frame
 	check(is_instance_valid(main.completed_badge) and main.completed_badge.is_visible_in_tree(), "Reopening a completed puzzle restores its badge")
@@ -582,18 +621,20 @@ func run() -> void:
 	check(not level_cards.is_empty() and level_cards[0].size == Vector2(64, 64), "Menu level cards are 64 by 64")
 	check(level_cards.all(func(node): return node.tooltip_text.is_empty()), "Level cards do not show hover popups")
 	check(main.menu_rows.get_child_count() == 1 and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_BEGIN, "Menu rows align their cards from the left")
-	check(main.content.get_child(0) is HBoxContainer and (main.content.get_child(0) as HBoxContainer).get_children().any(func(node): return node is Button and node.text == "Play"), "Play button sits beside the title")
+	check(main.content.get_child(0) is HBoxContainer and main.credit_label.text == str(main.store.credits), "Credits replace Play beside the menu title")
 	check((main.content.get_child(0) as HBoxContainer).get_child(0).text == "H e a r t h l i n e", "Cozy menu title has spaced letters")
-	check(main.content.get_child(0).get_child(2).theme_type_variation == "PrimaryButton", "Play uses the prominent button style")
+	check((main.content.get_child(0) as HBoxContainer).get_child(2) == main.credit_display, "Menu credit display sits at the top right")
 	var thumbnail: TextureRect = level_cards[0].get_children().filter(func(node): return node is TextureRect)[0]
 	check(thumbnail.position == Vector2.ZERO and thumbnail.size == Vector2(64, 64), "Screenshot fills the whole menu button")
 	check(level_cards.all(func(card): return card.get_children().all(func(node): return not node is Label)), "Menu cards have no numbers or checkmarks")
 	check(thumbnail.modulate == Color.WHITE and not level_cards[0].has_theme_stylebox_override("normal"), "Completed cards keep their original puzzle preview colors")
-	var card_outline: Panel = level_cards[0].get_children().filter(func(node): return node is Panel)[0]
+	var card_outline: Panel = level_cards[2].get_children().filter(func(node): return node is Panel)[0]
 	var outline_style: StyleBoxFlat = card_outline.get_theme_stylebox("panel")
-	check(outline_style.border_width_left == 2 and outline_style.corner_radius_top_left > 0 and outline_style.border_color == main.COMPLETED_CARD_OUTLINE, "Completed cards have a rounded green outline")
+	check(outline_style.border_width_left == 2 and outline_style.corner_radius_top_left > 0 and outline_style.border_color == main.COMPLETED_CARD_OUTLINE, "Completed cards with a solution have a rounded green outline")
 	var unfinished_outline: Panel = level_cards[5].get_children().filter(func(node): return node is Panel)[0]
 	check((unfinished_outline.get_theme_stylebox("panel") as StyleBoxFlat).border_color == Color("eae345"), "Uncompleted level cards have yellow outlines")
+	var unknown_outline: Panel = level_cards[1].get_children().filter(func(node): return node is Panel)[0]
+	check((unknown_outline.get_theme_stylebox("panel") as StyleBoxFlat).border_color == main.NO_SOLUTION_OUTLINE, "Saved levels without a solution are red in the menu")
 	level_cards[0].mouse_entered.emit()
 	check(main.background_tween != null and main.background_tween.is_running(), "Menu hover starts a fade")
 	check(level_cards[0].has_meta("hover_tween") and (level_cards[0].get_meta("hover_tween") as Tween).is_running(), "Menu hover starts the card growth animation")
@@ -706,12 +747,15 @@ func run() -> void:
 	var later_layout := {"width": 3, "height": 3, "tiles": [0, 0, 1, 0, 0, 0, 0, 0, 0]}
 	check(shifted_store.save_level(4, first_layout) == OK and shifted_store.save_level(6, next_layout) == OK and shifted_store.save_level(9, later_layout) == OK, "Sparse custom level fixtures save")
 	check(shifted_store.mark_complete(4) == OK and shifted_store.mark_complete(6) == OK, "Completed level fixtures save")
+	shifted_store.hints = {"6": 1}
 	check(shifted_store.insert_level(6, first_layout) == OK, "Insert persists a new custom level")
+	check(shifted_store.hint_stage(7) == 1 and shifted_store.hint_stage(6) == 0, "Insertion moves purchased hints with their puzzle")
 	check(shifted_store.get_level(6).tiles == first_layout.tiles and shifted_store.get_level(7).tiles == next_layout.tiles and shifted_store.get_level(10).tiles == later_layout.tiles, "Insertion shifts all later sparse custom levels up")
 	check(not shifted_store.completed.has("6") and shifted_store.completed.has("7"), "Insertion shifts completion records with level numbers")
 	var shifted_reload := LevelStore.new()
 	check(shifted_reload.get_level(7).tiles == next_layout.tiles and shifted_reload.get_level(10).tiles == later_layout.tiles, "Inserted level numbering survives reload")
 	check(shifted_store.delete_level(6) == OK, "Delete persists a saved custom level removal")
+	check(shifted_store.hint_stage(6) == 1 and shifted_store.hint_stage(7) == 0, "Deletion moves purchased hints back with their puzzle")
 	check(shifted_store.get_level(6).tiles == next_layout.tiles and shifted_store.get_level(9).tiles == later_layout.tiles and not shifted_store.levels.has("10"), "Deletion shifts later custom levels down")
 	check(shifted_store.completed.has("6") and not shifted_store.completed.has("7"), "Deletion shifts completion records back")
 	check(shifted_store.delete_level(5) == ERR_DOES_NOT_EXIST, "Generated levels cannot be deleted as custom levels")
@@ -721,6 +765,7 @@ func run() -> void:
 	reorder_store.completed.clear()
 	reorder_store.unlocked_through = 0
 	check(reorder_store.save_level(2, first_layout) == OK and reorder_store.complete_first(3) == OK, "Rearrange fixtures save")
+	reorder_store.hints = {"1": 1, "3": 2}
 	var original_one := reorder_store.get_level(1)
 	var original_three := reorder_store.get_level(3)
 	check(reorder_store.rearrange_level(1, 3, "insert", true) == OK, "Insert moves a dragged level after the target")
@@ -728,9 +773,10 @@ func run() -> void:
 	check(reorder_store.rearrange_level(2, 4, "swap") == OK, "Swap exchanges the dragged and target levels")
 	check(reorder_store.get_level(4).tiles == original_three.tiles and not reorder_store.completed.has("2") and reorder_store.completed.has("4") and reorder_store.menu_unlocked() == 10, "Swap carries completion and preserves unlocked groups")
 	check(reorder_store.rearrange_level(4, 1, "insert", false) == OK and reorder_store.get_level(1).tiles == original_three.tiles, "Insert also moves a dragged level before the target")
+	check(reorder_store.hint_stage(1) == 2 and reorder_store.hint_stage(4) == 1, "Rearranging keeps purchased hints with their puzzles")
 	check(reorder_store.rearrange_level(1, 1, "swap") == ERR_INVALID_PARAMETER, "Dropping a level on itself leaves the order alone")
 	var reorder_reload := LevelStore.new()
-	check(reorder_reload.get_level(1).tiles == original_three.tiles and reorder_reload.menu_unlocked() == 10, "Rearranged puzzles and unlock range survive reload")
+	check(reorder_reload.get_level(1).tiles == original_three.tiles and reorder_reload.menu_unlocked() == 10 and reorder_reload.hint_stage(1) == 2, "Rearranged puzzles, hints, and unlock range survive reload")
 	var unlock_store := LevelStore.new()
 	unlock_store.completed.clear()
 	unlock_store.unlocked_through = 0
@@ -756,7 +802,7 @@ func run() -> void:
 	check(main.store.frontier() == 100 and main.store.completed.has("99"), "Shift+Z+M completes and unlocks the first 99 levels")
 	var menu_scroll := main.content.get_child(main.content.get_child_count() - 1) as ScrollContainer
 	check(main.menu_cards.size() == 105 and main.menu_columns <= 15 and main.menu_rows.get_child_count() == ceili(106.0 / main.menu_columns) and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_BEGIN and menu_scroll.vertical_scroll_mode == ScrollContainer.SCROLL_MODE_SHOW_ALWAYS, "Menu shows every unlocked group in one scrollable grid")
-	check((main.content.get_child(0) as HBoxContainer).get_child(2).text == "Play", "Unlock shortcut keeps the menu play button label short")
+	check(main.credit_label.text == str(main.store.credits), "Unlock shortcut refreshes the menu credits")
 	key(main, KEY_M, false, false, true)
 	key(main, KEY_Z, false, false, true)
 	key(main, KEY_SHIFT, false)
@@ -778,7 +824,7 @@ func run() -> void:
 	key(main, KEY_Z, true, false, true)
 	key(main, KEY_N, true, false, true)
 	check(main.store.frontier() == 2 and main.store.completed.size() == 1 and main.store.completed.has("1"), "Shift+Z+N clears completion except level 1")
-	check(main.screen == "menu" and main.menu_cards.size() == 5 and (main.content.get_child(0) as HBoxContainer).get_child(2).text == "Play", "Reset shortcut restores the first unlocked group")
+	check(main.screen == "menu" and main.menu_cards.size() == 5 and main.credit_label.text == "1", "Reset shortcut restores the first unlocked group and one credit")
 	key(main, KEY_N, false, false, true)
 	key(main, KEY_Z, false, false, true)
 	key(main, KEY_SHIFT, false)
@@ -788,7 +834,7 @@ func run() -> void:
 	main.show_menu()
 	var shown_numbers: Array = main.menu_cards.map(func(card): return int(card.get("level_number")))
 	check(shown_numbers == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "Menu includes every level in unlocked groups across completion gaps")
-	check((main.content.get_child(0) as HBoxContainer).get_child(2).text == "Play", "Play button keeps its short label after a menu rebuild")
+	check(main.credit_label.text == str(main.store.credits), "Menu rebuild preserves the credit display")
 	main._toggle_rearrange()
 	await process_frame
 	main._start_menu_drag(4, main.menu_cards[3].global_position + Vector2(32, 32))
@@ -802,10 +848,11 @@ func run() -> void:
 	main.play_level(10)
 	play_controls = main.content.get_child(2) as HBoxContainer
 	(play_controls.get_child(4) as Button).pressed.emit()
-	check(main.current_level == 1 and main.store.completed.has("1"), "Next puzzle button wraps to the adjacent completed level")
+	check(main.current_level == 10 and main.screen_shake_tween.is_running(), "Next puzzle at the last unlocked level shakes without wrapping")
+	check(main.find_children("", "Label", true, false).any(func(node): return node.text == "Complete more puzzles..." and node.get_theme_color("font_outline_color") == Color.BLACK), "Locked next puzzle shows outlined floating feedback")
 	play_controls = main.content.get_child(2) as HBoxContainer
 	(play_controls.get_child(2) as Button).pressed.emit()
-	check(main.current_level == 10, "Previous puzzle button wraps to the adjacent level")
+	check(main.current_level == 9, "Previous puzzle button visits the adjacent level")
 	print("%d checks, %d failures in %.2fs" % [checks, failures, (Time.get_ticks_msec() - started) / 1000.0])
 	quit(1 if failures else 0)
 

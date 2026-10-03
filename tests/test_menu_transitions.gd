@@ -28,6 +28,8 @@ func run() -> void:
 	root.add_child(main)
 	main.store.mirror_project = false
 	main.store.completed.clear()
+	main.store.hints.clear()
+	main.store.credits = 0
 	main.store.unlocked_through = 105
 	var layout := {"width": 5, "height": 3, "tiles": [1, 0, 1, 0, 1, 0, 2, 0, 2, 0, 1, 0, 1, 0, 1]}
 	if "--generated" in OS.get_cmdline_user_args():
@@ -90,13 +92,13 @@ func run() -> void:
 	main._open_adjacent_level(1)
 	await settle()
 	await create_timer(0.06).timeout
-	check(main.current_level == 3 and main.transition_old_shell.position.x < 0.0 and main.transition_new_shell.position.x > 0.0, "Forward navigation pushes the old puzzle left")
+	check(main.current_level == 3 and main.transition_old_board.position.x < main.board.position.x and main.transition_old_shell.position.x == 0.0 and main.transition_new_shell.position.x == 0.0, "Forward navigation slides the puzzle while buttons stay fixed")
 	await capture("transition-forward")
 	await create_timer(0.25).timeout
 	main._open_adjacent_level(-1)
 	await settle()
 	await create_timer(0.06).timeout
-	check(main.current_level == 2 and main.transition_old_shell.position.x > 0.0 and main.transition_new_shell.position.x < 0.0, "Backward navigation pushes the old puzzle right")
+	check(main.current_level == 2 and main.transition_old_board.position.x > main.board.position.x and main.transition_old_shell.position.x == 0.0 and main.transition_new_shell.position.x == 0.0, "Backward navigation slides the puzzle while buttons stay fixed")
 	await capture("transition-backward")
 	await create_timer(0.25).timeout
 	main.play_level(105)
@@ -104,11 +106,11 @@ func run() -> void:
 	main._open_adjacent_level(1)
 	await settle()
 	await create_timer(0.06).timeout
-	check(main.current_level == 1 and main.transition_new_shell.position.x > 0.0, "Wrapping forward keeps the forward animation direction")
+	check(main.current_level == 105 and main.screen_shake_tween.is_running() and not is_instance_valid(main.screen_transition), "Next at the last unlocked puzzle shakes instead of wrapping")
 	main._open_adjacent_level(-1)
 	await settle()
 	await create_timer(0.06).timeout
-	check(main.current_level == 105 and main.transition_new_shell.position.x < 0.0, "Wrapping backward keeps the backward animation direction")
+	check(main.current_level == 104 and main.transition_old_board.position.x > main.board.position.x, "Previous visits the preceding puzzle")
 	main.size = Vector2(1120, 680)
 	main.show_menu()
 	await create_timer(0.3).timeout
@@ -123,7 +125,7 @@ func run() -> void:
 	await create_timer(0.3).timeout
 	var completed_card: Button = main.menu_cards[4]
 	var completed_outline: Panel = completed_card.get_children().filter(func(node): return node is Panel)[0]
-	check((completed_outline.get_theme_stylebox("panel") as StyleBoxFlat).border_color == main.COMPLETED_CARD_OUTLINE and (completed_card.get_child(0) as TextureRect).modulate == Color.WHITE, "Changed completion refreshes the green outline and preserves the puzzle preview colors")
+	check((completed_outline.get_theme_stylebox("panel") as StyleBoxFlat).border_color == main.NO_SOLUTION_OUTLINE and (completed_card.get_child(0) as TextureRect).modulate == Color.WHITE, "Changed completion retains the red unknown-solution outline and puzzle preview colors")
 	main.store.unlocked_through = 110
 	main.store.levels.erase("106")
 	main.store.cache.erase(106)

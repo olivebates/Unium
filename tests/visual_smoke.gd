@@ -22,21 +22,26 @@ func run() -> void:
 	main.store.colors.clear()
 	main.store.line_colors.clear()
 	main.store.completed.clear()
+	main.store.hints.clear()
+	main.store.credits = 0
 	main.store.unlocked_through = 0
 	main.show_menu()
 	await capture("first-menu")
 	for number in range(1, 100):
 		main.store.completed[str(number)] = true
+	main.store.credits = 99
 	main.show_menu()
 	await capture("menu-15")
 	main.store.completed.clear()
 	for number in range(1, 20):
 		main.store.completed[str(number)] = true
+	main.store.credits = 19
 	main.show_menu()
 	await capture("menu-partial")
 	main.store.completed.clear()
 	for number in range(1, 8):
 		main.store.completed[str(number)] = true
+	main.store.credits = 7
 	main.show_menu()
 	await capture("menu")
 	var first_card: Button = main.menu_cards[0]
@@ -49,6 +54,12 @@ func run() -> void:
 	main.play_level(8)
 	await create_timer(0.65).timeout
 	await capture("play")
+	main._use_hint()
+	await create_timer(0.75).timeout
+	await capture("hint-start")
+	main._use_hint()
+	await create_timer(0.75).timeout
+	await capture("hint-finish")
 	var solution: Array = main.store.get_level(8).solution
 	main.board.path = solution.slice(0, 5)
 	main.board.refresh()

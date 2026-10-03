@@ -13,6 +13,8 @@ var levels: Dictionary = {}
 var colors: Dictionary = {}
 var line_colors: Dictionary = {}
 var completed: Dictionary = {}
+var hints: Dictionary = {}
+var credits := 0
 var unlocked_through := 0
 var cache: Dictionary = {}
 var persistence_error := ""
@@ -33,8 +35,14 @@ func _init() -> void:
 		for key in progress.completed:
 			if str(key).is_valid_int() and int(key) > 0 and progress.completed[key] == true:
 				completed[str(key)] = true
+	if progress.get("hints") is Dictionary:
+		for key in progress.hints:
+			var stage: Variant = progress.hints[key]
+			if str(key).is_valid_int() and int(key) > 0 and (stage is int or stage is float) and int(stage) == stage and int(stage) in [1, 2]:
+				hints[str(key)] = int(stage)
 	if progress.get("unlocked_through") is int or progress.get("unlocked_through") is float:
 		unlocked_through = maxi(0, int(progress.unlocked_through))
+	credits = maxi(0, int(progress.credits)) if progress.get("credits") is int or progress.get("credits") is float else completed.size()
 
 static func _previous_path(folder: String, filename: String) -> String:
 	return OS.get_data_dir().path_join(folder).path_join(filename)
@@ -51,7 +59,11 @@ func _load_levels(path: String) -> void:
 				var normalized: Array = []
 				for tile in value.tiles:
 					normalized.append(int(tile))
-				levels[str(key)] = {"width": int(value.width), "height": int(value.height), "tiles": normalized}
+				var layout := {"width": int(value.width), "height": int(value.height), "tiles": normalized}
+				if _valid_solution_endpoints(value):
+					layout["solution_start"] = int(value.solution_start)
+					layout["solution_end"] = int(value.solution_end)
+				levels[str(key)] = layout
 	if data.get("colors") is Dictionary:
 		var identifiers: Array[int] = []
 		for key in data.colors:
@@ -91,6 +103,13 @@ static func valid_level(value: Variant) -> bool:
 			return false
 	return true
 
+static func _valid_solution_endpoints(value: Dictionary) -> bool:
+	var first: Variant = value.get("solution_start")
+	var last: Variant = value.get("solution_end")
+	if not (first is int or first is float) or not (last is int or last is float):
+		return false
+	return int(first) == first and int(last) == last and int(first) >= 0 and int(last) >= 0 and int(first) < value.tiles.size() and int(last) < value.tiles.size()
+
 func get_level(number: int) -> Dictionary:
 	var key := str(number)
 	if levels.has(key):
@@ -98,6 +117,18 @@ func get_level(number: int) -> Dictionary:
 	if not cache.has(number):
 		cache[number] = Puzzle.generate(number)
 	return cache[number].duplicate(true)
+
+func has_solution(number: int) -> bool:
+	var key := str(number)
+	return not levels.has(key) or _valid_solution_endpoints(levels[key])
+
+func hint_endpoints(number: int) -> Array[int]:
+	var level := get_level(number)
+	if _valid_solution_endpoints(level):
+		return [int(level.solution_start), int(level.solution_end)]
+	if level.get("solution") is Array and not level.solution.is_empty():
+		return [int(level.solution.front()), int(level.solution.back())]
+	return []
 
 func get_color(number: int) -> Color:
 	var group := str(group_start(number))
@@ -147,12 +178,44 @@ func adjacent_level(current: int, direction: int) -> int:
 	return posmod(current - 1 + direction, last) + 1
 
 func mark_complete(number: int) -> Error:
-	completed[str(number)] = true
+	if not completed.get(str(number), false):
+		completed[str(number)] = true
+		credits += 1
 	return save_progress()
+
+func spend_credit() -> Error:
+	if credits <= 0:
+		return ERR_UNAVAILABLE
+	credits -= 1
+	var result := save_progress()
+	if result != OK:
+		credits += 1
+	return result
+
+func hint_stage(number: int) -> int:
+	return int(hints.get(str(number), 0))
+
+func purchase_hint(number: int) -> Error:
+	if number < 1 or credits <= 0 or hint_stage(number) >= 2:
+		return ERR_UNAVAILABLE
+	var key := str(number)
+	var previous := hint_stage(number)
+	credits -= 1
+	hints[key] = previous + 1
+	var result := save_progress()
+	if result != OK:
+		credits += 1
+		if previous == 0:
+			hints.erase(key)
+		else:
+			hints[key] = previous
+	return result
 
 func complete_first(number: int) -> Error:
 	for level in range(1, number + 1):
-		completed[str(level)] = true
+		if not completed.get(str(level), false):
+			completed[str(level)] = true
+			credits += 1
 	return save_progress()
 
 func set_completion_through(number: int) -> Error:
@@ -162,16 +225,18 @@ func set_completion_through(number: int) -> Error:
 	for level in range(1, number + 1):
 		completed[str(level)] = true
 	unlocked_through = 0
+	credits = number
 	return save_progress()
 
 func reset_completion_to_first() -> Error:
 	completed = {"1": true}
 	unlocked_through = 0
+	credits = 1
 	return save_progress()
 
 func save_progress() -> Error:
 	unlocked_through = menu_unlocked()
-	return _atomic_write(PROGRESS_PATH, {"completed": completed, "unlocked_through": unlocked_through})
+	return _atomic_write(PROGRESS_PATH, {"completed": completed, "unlocked_through": unlocked_through, "credits": credits, "hints": hints})
 
 func save_level(number: int, value: Dictionary) -> Error:
 	if number < 1 or not valid_level(value):
@@ -179,11 +244,27 @@ func save_level(number: int, value: Dictionary) -> Error:
 	levels[str(number)] = {"width": int(value.width), "height": int(value.height), "tiles": value.tiles.duplicate()}
 	return save_levels()
 
+func record_editor_solution(number: int, value: Dictionary, path: Array) -> Error:
+	if number < 1 or not valid_level(value) or path.is_empty() or not Puzzle.is_complete(value.tiles, path):
+		return ERR_INVALID_DATA
+	var layout := {"width": int(value.width), "height": int(value.height), "tiles": value.tiles.duplicate(), "solution_start": int(path.front()), "solution_end": int(path.back())}
+	var key := str(number)
+	var previous: Variant = levels.get(key)
+	levels[key] = layout
+	var result := save_levels()
+	if result != OK:
+		if previous == null:
+			levels.erase(key)
+		else:
+			levels[key] = previous
+	return result
+
 func insert_level(number: int, value: Dictionary) -> Error:
 	if number < 1 or not valid_level(value):
 		return ERR_INVALID_DATA
 	var previous_levels := levels
 	var previous_completed := completed
+	var previous_hints := hints
 	var shifted_levels := {}
 	for key in levels:
 		var index := int(key)
@@ -193,9 +274,14 @@ func insert_level(number: int, value: Dictionary) -> Error:
 	for key in completed:
 		var index := int(key)
 		shifted_completed[str(index + 1 if index >= number else index)] = completed[key]
+	var shifted_hints := {}
+	for key in hints:
+		var index := int(key)
+		shifted_hints[str(index + 1 if index >= number else index)] = hints[key]
 	levels = shifted_levels
 	completed = shifted_completed
-	return _save_shifted_levels(previous_levels, previous_completed)
+	hints = shifted_hints
+	return _save_shifted_levels(previous_levels, previous_completed, previous_hints)
 
 func delete_level(number: int) -> Error:
 	if number < 1:
@@ -204,6 +290,7 @@ func delete_level(number: int) -> Error:
 		return ERR_DOES_NOT_EXIST
 	var previous_levels := levels
 	var previous_completed := completed
+	var previous_hints := hints
 	var shifted_levels := {}
 	for key in levels:
 		var index := int(key)
@@ -214,9 +301,15 @@ func delete_level(number: int) -> Error:
 		var index := int(key)
 		if index != number:
 			shifted_completed[str(index - 1 if index > number else index)] = completed[key]
+	var shifted_hints := {}
+	for key in hints:
+		var index := int(key)
+		if index != number:
+			shifted_hints[str(index - 1 if index > number else index)] = hints[key]
 	levels = shifted_levels
 	completed = shifted_completed
-	return _save_shifted_levels(previous_levels, previous_completed)
+	hints = shifted_hints
+	return _save_shifted_levels(previous_levels, previous_completed, previous_hints)
 
 func rearrange_level(source: int, target: int, action: String, after: bool = false) -> Error:
 	var visible := menu_levels()
@@ -227,14 +320,17 @@ func rearrange_level(source: int, target: int, action: String, after: bool = fal
 		return ERR_INVALID_PARAMETER
 	var previous_levels := levels
 	var previous_completed := completed
+	var previous_hints := hints
 	var previous_unlocked := unlocked_through
 	var first := mini(source, target)
 	var last := maxi(source, target)
 	var layouts: Array[Dictionary] = []
 	var progress: Array[bool] = []
+	var reveals: Array[int] = []
 	for number in range(first, last + 1):
 		layouts.append(get_level(number))
 		progress.append(completed.get(str(number), false))
+		reveals.append(hint_stage(number))
 	if action == "swap":
 		var left := source - first
 		var right := target - first
@@ -244,34 +340,57 @@ func rearrange_level(source: int, target: int, action: String, after: bool = fal
 		var held_progress := progress[left]
 		progress[left] = progress[right]
 		progress[right] = held_progress
+		var held_reveals := reveals[left]
+		reveals[left] = reveals[right]
+		reveals[right] = held_reveals
 	else:
 		var removed_layout: Dictionary = layouts.pop_at(source - first)
 		var removed_progress: bool = progress.pop_at(source - first)
+		var removed_reveals: int = reveals.pop_at(source - first)
 		var insertion := target - first + (1 if after else 0)
 		if source < target or (source == target and after):
 			insertion -= 1
 		layouts.insert(insertion, removed_layout)
 		progress.insert(insertion, removed_progress)
+		reveals.insert(insertion, removed_reveals)
 	levels = levels.duplicate(true)
 	completed = completed.duplicate(true)
+	hints = hints.duplicate(true)
 	for offset in range(layouts.size()):
 		var number := first + offset
 		var layout := layouts[offset]
-		levels[str(number)] = {"width": layout.width, "height": layout.height, "tiles": layout.tiles.duplicate()}
+		var stored := {"width": layout.width, "height": layout.height, "tiles": layout.tiles.duplicate()}
+		var endpoints := _endpoints_from_layout(layout)
+		if not endpoints.is_empty():
+			stored["solution_start"] = endpoints[0]
+			stored["solution_end"] = endpoints[1]
+		levels[str(number)] = stored
 		if progress[offset]:
 			completed[str(number)] = true
 		else:
 			completed.erase(str(number))
+		if reveals[offset] > 0:
+			hints[str(number)] = reveals[offset]
+		else:
+			hints.erase(str(number))
 	unlocked_through = unlocked
-	return _save_shifted_levels(previous_levels, previous_completed, previous_unlocked)
+	return _save_shifted_levels(previous_levels, previous_completed, previous_hints, previous_unlocked)
 
-func _save_shifted_levels(previous_levels: Dictionary, previous_completed: Dictionary, previous_unlocked: int = -1) -> Error:
+static func _endpoints_from_layout(layout: Dictionary) -> Array[int]:
+	if _valid_solution_endpoints(layout):
+		return [int(layout.solution_start), int(layout.solution_end)]
+	if layout.get("solution") is Array and not layout.solution.is_empty():
+		return [int(layout.solution.front()), int(layout.solution.back())]
+	return []
+
+func _save_shifted_levels(previous_levels: Dictionary, previous_completed: Dictionary, previous_hints: Dictionary, previous_unlocked: int = -1) -> Error:
 	var result := save_levels()
 	if result == OK:
 		result = save_progress()
 	if result != OK:
 		levels = previous_levels
 		completed = previous_completed
+		hints = previous_hints
 		if previous_unlocked >= 0:
 			unlocked_through = previous_unlocked
 		save_levels()

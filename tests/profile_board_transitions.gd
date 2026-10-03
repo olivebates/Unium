@@ -41,6 +41,8 @@ func run() -> void:
 	root.add_child(main)
 	main.store.mirror_project = false
 	main.store.completed.clear()
+	main.store.hints.clear()
+	main.store.credits = 0
 	main.store.unlocked_through = 40
 	for number in [1, 6, 8, 9, 11, 26, 36]:
 		main.store.get_level(number)

@@ -35,6 +35,10 @@ var start_dot: Polygon2D
 var show_start_finish := false
 var start_label: Label
 var finish_label: Label
+var hint_start_label: Label
+var hint_finish_label: Label
+var hint_start_cell := -1
+var hint_finish_cell := -1
 var thumbnail_mode := false
 var line_tween: Tween
 var tile_tweens: Dictionary = {}
@@ -80,6 +84,8 @@ func _ready() -> void:
 	line_group.add_child(start_dot)
 	start_label = _tutorial_label("Drag")
 	finish_label = _tutorial_label("")
+	hint_start_label = _tutorial_label("Start")
+	hint_finish_label = _tutorial_label("Finish")
 	resized.connect(refresh)
 	mouse_exited.connect(func():
 		if hovered != -1:
@@ -111,6 +117,11 @@ func configure(level: Dictionary, color: Color, line_override: Color = Color.TRA
 	dragging = false
 	right_dragging = false
 	locked = false
+	hint_start_cell = -1
+	hint_finish_cell = -1
+	if is_instance_valid(hint_start_label):
+		hint_start_label.hide()
+		hint_finish_label.hide()
 	tile_visuals.clear()
 	refresh()
 
@@ -132,6 +143,7 @@ func cell_at(point: Vector2) -> int:
 
 func refresh(animate: bool = false) -> void:
 	_update_tutorial_labels()
+	_update_hint_labels()
 	var values := Puzzle.resolved_tiles(tiles, path)
 	rendered_values = values
 	_prepare_tile_styles()
@@ -195,6 +207,38 @@ func _update_tutorial_labels() -> void:
 	start_label.size = label_size
 	start_label.position = center(first) - label_size * 0.5
 	start_label.visible = true
+
+func show_solution_hint(cell: int, is_start: bool) -> Label:
+	if cell < 0 or cell >= tiles.size():
+		return null
+	if is_start:
+		hint_start_cell = cell
+	else:
+		hint_finish_cell = cell
+	_update_hint_labels()
+	return hint_start_label if is_start else hint_finish_label
+
+func _update_hint_labels() -> void:
+	if not is_instance_valid(hint_start_label):
+		return
+	var cell_size: float = geometry().cell
+	if cell_size <= 0.0:
+		return
+	var shared := hint_start_cell >= 0 and hint_start_cell == hint_finish_cell
+	var label_size := Vector2.ONE * cell_size
+	var font_size := clampi(int(cell_size * (0.18 if shared else 0.22)), 10, 24)
+	for item in [[hint_start_label, hint_start_cell, true], [hint_finish_label, hint_finish_cell, false]]:
+		var node: Label = item[0]
+		var cell: int = item[1]
+		if cell < 0:
+			node.hide()
+			continue
+		node.add_theme_font_size_override("font_size", font_size)
+		node.size = Vector2(label_size.x, label_size.y * 0.5) if shared else label_size
+		node.position = center(cell) - label_size * 0.5
+		if shared and not item[2]:
+			node.position.y += label_size.y * 0.5
+		node.show()
 
 func _animate_line_along_path(initial: PackedVector2Array, target: PackedVector2Array) -> void:
 	if target.is_empty():
@@ -455,6 +499,9 @@ func _begin(point: Vector2) -> void:
 		path.append(cell)
 		_changed()
 	else:
+		if cell == path.front():
+			clear_path()
+			return
 		var visit := path.rfind(cell)
 		if visit >= 0:
 			dragging = true
