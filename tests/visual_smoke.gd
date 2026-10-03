@@ -66,6 +66,12 @@ func run() -> void:
 	await capture("line")
 	main._toggle_editor()
 	await capture("editor")
+	main.editor_solve_button.pressed.emit()
+	while main.editor_solver != null:
+		await process_frame
+	await create_timer(0.25).timeout
+	await capture("editor-solved")
+	main._toggle_editor_playtest()
 	main.crossover_input.value = 0
 	main.move_input.value = 15
 	main._generate_editor_level()

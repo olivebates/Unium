@@ -5,6 +5,7 @@ const RearrangeCard = preload("res://scripts/rearrange_card.gd")
 const MenuThumbnailJob = preload("res://scripts/menu_thumbnail_job.gd")
 const CompletedBadge = preload("res://scripts/completed_badge.gd")
 const CoinIcon = preload("res://scripts/coin_icon.gd")
+const PuzzleSolver = preload("res://scripts/puzzle_solver.gd")
 const SCREEN_TRANSITION_DURATION := 0.2
 
 const BG := Color("0c1219")
@@ -94,6 +95,8 @@ var editor_message: Label
 var editor_mode_hint: Label
 var editor_controls: VBoxContainer
 var editor_playtesting := false
+var editor_solver: RefCounted
+var editor_solve_button: Button
 var width_input: SpinBox
 var height_input: SpinBox
 var move_input: SpinBox
@@ -466,6 +469,8 @@ func _start_screen_transition(outgoing: Control, kind: String, old_board: Puzzle
 	tween.finished.connect(_finish_screen_transition)
 
 func _shell(restore_menu: bool = false) -> void:
+	editor_solver = null
+	editor_solve_button = null
 	_finish_screen_transition()
 	if screen_shake_tween and screen_shake_tween.is_running():
 		screen_shake_tween.kill()
@@ -1299,6 +1304,8 @@ func _input(event: InputEvent) -> void:
 			_toggle_editor_playtest()
 			get_viewport().set_input_as_handled()
 			return
+		if editor_playtesting:
+			return
 		if key == KEY_Z and event.pressed and event.ctrl_pressed and not event.shift_pressed and not event.alt_pressed and not pressed_keys.has(KEY_I):
 			# Defer until release to distinguish Ctrl+Z from Ctrl+Z+I.
 			pending_undo = true
@@ -1417,6 +1424,9 @@ func _show_editor() -> void:
 	controls.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	controls.add_theme_constant_override("separation", 9)
 	controls_scroll.add_child(controls)
+	editor_solve_button = button("Solve puzzle", _solve_editor, true)
+	editor_solve_button.focus_mode = Control.FOCUS_NONE
+	controls.add_child(editor_solve_button)
 	controls.add_child(label("SAVE AS LEVEL", 12, MUTED))
 	var number_input := _spin(editor_level, 1, 100000)
 	editor_number_input = number_input
@@ -1468,11 +1478,57 @@ func _show_editor() -> void:
 	editor_message = label("Paint, then save to replace\nthe generated puzzle.", 13, ACCENT)
 	editor_message.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	controls.add_child(editor_message)
-	content.add_child(label("Neutral tiles never flip. Custom layouts are saved exactly as drawn; solvability is up to you.", 13, MUTED))
+	controls.move_child(editor_message, 1)
+	content.add_child(label("Neutral tiles never flip. Solve puzzle finds a legal line and shows it in playtest mode.", 13, MUTED))
+
+func _solve_editor() -> void:
+	if editor_solver != null:
+		_toggle_editor_playtest()
+		editor_message.text = "Search cancelled. The puzzle is unchanged."
+		return
+	if screen != "editor" or editor_playtesting or color_mode:
+		return
+	_toggle_editor_playtest()
+	board.locked = true
+	editor_mode_hint.text = "SOLVING · SPACE TO CANCEL"
+	editor_message.text = "Searching for a legal line…"
+	editor_solve_button.text = "Cancel solve"
+	editor_solve_button.disabled = false
+	var token := transition_id
+	var search := PuzzleSolver.new(editor_data)
+	editor_solver = search
+	# Let the status and Cancel button draw before exploring routes.
+	await get_tree().process_frame
+	if token != transition_id or screen != "editor" or editor_solver != search:
+		return
+	var started := Time.get_ticks_msec()
+	var next_update := started
+	while editor_solver == search and token == transition_id and screen == "editor":
+		search.advance()
+		if search.status == "solved":
+			editor_solver = null
+			editor_solve_button.text = "Solve puzzle"
+			editor_solve_button.disabled = true
+			board.path = search.solution.duplicate()
+			board.refresh(true)
+			_editor_playtest_solved()
+			return
+		if search.status == "unsolvable":
+			_toggle_editor_playtest()
+			editor_message.text = "No legal solution exists for this layout."
+			return
+		var now := Time.get_ticks_msec()
+		if now >= next_update:
+			editor_message.text = "Searching… %s paths checked (%ds).\nCancel to keep editing." % [search.nodes, (now - started) / 1000]
+			next_update = now + 200
+		await get_tree().process_frame
 
 func _toggle_editor_playtest() -> void:
 	if screen != "editor" or not is_instance_valid(board):
 		return
+	editor_solver = null
+	if is_instance_valid(editor_solve_button):
+		editor_solve_button.text = "Solve puzzle"
 	board._end()
 	board._end_light()
 	_finish_stroke()
@@ -1773,6 +1829,8 @@ func _save_editor() -> void:
 		editor_message.text = "Save failed: " + error_string(result)
 
 func _toggle_color_editor() -> void:
+	if editor_solver != null:
+		_toggle_editor_playtest()
 	if screen == "play" and is_instance_valid(board) and board.locked and not color_mode:
 		return
 	if color_mode:
