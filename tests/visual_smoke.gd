@@ -33,7 +33,7 @@ func run() -> void:
 		main.store.completed[str(number)] = true
 	main.show_menu()
 	await capture("menu")
-	var first_card: Button = main.find_children("", "Button", true, false).filter(func(node): return node.tooltip_text == "Play level 1")[0]
+	var first_card: Button = main.menu_cards[0]
 	first_card.mouse_entered.emit()
 	await create_timer(0.35).timeout
 	await capture("menu-hover")
@@ -48,6 +48,10 @@ func run() -> void:
 	await capture("line")
 	main._toggle_editor()
 	await capture("editor")
+	main.crossover_input.value = 0
+	main.move_input.value = 15
+	main._generate_editor_level()
+	await capture("editor-generated")
 	main._toggle_editor_playtest()
 	main.board._begin(main.board.center(0))
 	await capture("editor-playtest")

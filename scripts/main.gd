@@ -1,6 +1,7 @@
 extends Control
 
 const CelebrationLines = preload("res://scripts/celebration_lines.gd")
+const RearrangeCard = preload("res://scripts/rearrange_card.gd")
 
 const BG := Color("0c1219")
 const PANEL := Color("141e28")
@@ -27,14 +28,26 @@ var toast: Label
 var toast_timer := 0.0
 var transition_id := 0
 var menu_page := 0
+var rearrange_mode := false
+var rearrange_action := "insert"
 var menu_rows: VBoxContainer
 var menu_cards: Array[Button] = []
 var menu_columns := 0
+var menu_thumbnail_cache: Dictionary = {}
+var menu_drag_source := 0
+var menu_drag_target := 0
+var menu_drag_after := false
+var menu_drag_origin := Vector2.ZERO
+var menu_dragging := false
+var menu_drag_icon: TextureRect
+var menu_drag_tweens: Dictionary = {}
+var menu_drag_destinations: Dictionary = {}
 var pressed_keys: Dictionary = {}
 var chord_active := false
 var pending_undo := false
 var editor_level := 1
 var editor_data: Dictionary
+var copied_editor_data: Dictionary = {}
 var undo_stack: Array = []
 var redo_stack: Array = []
 var stroke_before: Dictionary = {}
@@ -45,6 +58,10 @@ var editor_controls: VBoxContainer
 var editor_playtesting := false
 var width_input: SpinBox
 var height_input: SpinBox
+var move_input: SpinBox
+var editor_generation_moves := -1
+var crossover_input: SpinBox
+var editor_required_crossings := Puzzle.MAX_GENERATED_CROSSINGS
 var editor_number_input: SpinBox
 var brush_buttons: Array[Button] = []
 var restoring_editor := false
@@ -77,7 +94,7 @@ func _update_menu_columns() -> void:
 	if not is_instance_valid(menu_rows):
 		return
 	var columns := mini(MENU_MAX_COLUMNS, maxi(1, int((size.x - 88 + 12) / 76)))
-	menu_rows.custom_minimum_size.x = maxf(0.0, size.x - 104.0)
+	menu_rows.custom_minimum_size.x = columns * 64 + (columns - 1) * 12
 	if columns == menu_columns and menu_rows.get_child_count() > 0:
 		return
 	menu_columns = columns
@@ -88,7 +105,7 @@ func _update_menu_columns() -> void:
 		row.queue_free()
 	for first in range(0, menu_cards.size(), columns):
 		var row := HBoxContainer.new()
-		row.alignment = BoxContainer.ALIGNMENT_CENTER
+		row.alignment = BoxContainer.ALIGNMENT_BEGIN
 		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_theme_constant_override("separation", 12)
 		menu_rows.add_child(row)
@@ -130,7 +147,13 @@ func _build_theme() -> void:
 	theme = theme_resource
 
 func _apply_ui_palette(color: Color) -> void:
-	_apply_ui_colors(PuzzleBoard.text_color(color), PuzzleBoard.button_color(color))
+	_apply_ui_colors(_ui_text_color(color), _ui_button_color(color))
+
+func _ui_text_color(color: Color) -> Color:
+	return PuzzleBoard.menu_text_color(color) if screen == "menu" else PuzzleBoard.text_color(color)
+
+func _ui_button_color(color: Color) -> Color:
+	return PuzzleBoard.menu_button_color(color) if screen == "menu" else PuzzleBoard.button_color(color)
 
 func _apply_ui_colors(light: Color, dark: Color) -> void:
 	palette_text = light
@@ -163,8 +186,8 @@ func _style_buttons(kind: String, base: Color, text_color: Color) -> void:
 func _animate_ui_palette(target_color: Color, duration: float, from_text: Color, from_button: Color) -> void:
 	if palette_tween and palette_tween.is_running():
 		palette_tween.kill()
-	var target_text := PuzzleBoard.text_color(target_color)
-	var target_button := PuzzleBoard.button_color(target_color)
+	var target_text := _ui_text_color(target_color)
+	var target_button := _ui_button_color(target_color)
 	_apply_ui_colors(from_text, from_button)
 	palette_tween = create_tween()
 	palette_tween.tween_method(func(progress: float):
@@ -199,6 +222,7 @@ func spacer(parent: Control) -> Control:
 	return node
 
 func _shell() -> void:
+	_cancel_menu_drag()
 	transition_id += 1
 	if background_tween and background_tween.is_running():
 		background_tween.kill()
@@ -246,6 +270,15 @@ func show_menu() -> void:
 	screen = "menu"
 	color_mode = false
 	_shell()
+	if rearrange_mode:
+		var tools_row := HBoxContainer.new()
+		content.add_child(tools_row)
+		tools_row.add_child(label("Rearrange levels", 18))
+		tools_row.add_child(button("Insert", func(): _set_rearrange_action("insert"), rearrange_action == "insert"))
+		tools_row.add_child(button("Swap", func(): _set_rearrange_action("swap"), rearrange_action == "swap"))
+		spacer(tools_row)
+		tools_row.add_child(button("Done", _toggle_rearrange))
+		content.add_child(label("Choose Insert or Swap, then drag between or over levels to preview the move. Insert uses the left or right half for before or after.", 14, MUTED))
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -253,15 +286,21 @@ func show_menu() -> void:
 	content.add_child(scroll)
 	var rows := VBoxContainer.new()
 	menu_rows = rows
-	rows.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	rows.add_theme_constant_override("separation", 12)
-	scroll.add_child(rows)
-	var unlocked := store.frontier()
+	var centered_rows := HBoxContainer.new()
+	centered_rows.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(centered_rows)
+	spacer(centered_rows)
+	centered_rows.add_child(rows)
+	spacer(centered_rows)
+	var unlocked := store.menu_unlocked()
 	menu_page = clampi(menu_page, 0, int((unlocked - 1) / MENU_PAGE_SIZE))
-	for number in range(menu_page * MENU_PAGE_SIZE + 1, mini(unlocked + 1, (menu_page + 1) * MENU_PAGE_SIZE + 1)):
+	var first := 1 if rearrange_mode else menu_page * MENU_PAGE_SIZE + 1
+	var last := unlocked + 1 if rearrange_mode else mini(unlocked + 1, (menu_page + 1) * MENU_PAGE_SIZE + 1)
+	for number in range(first, last):
 		menu_cards.append(_level_card(number))
 	_update_menu_columns()
-	if unlocked > MENU_PAGE_SIZE:
+	if unlocked > MENU_PAGE_SIZE and not rearrange_mode:
 		var pages := HBoxContainer.new()
 		content.add_child(pages)
 		var previous := button("← Previous", func(): menu_page -= 1; show_menu())
@@ -275,15 +314,21 @@ func show_menu() -> void:
 		pages.add_child(next)
 
 func _level_card(number: int) -> Button:
-	var card := button("", func(): play_level(number))
+	var card := RearrangeCard.new()
+	card.level_number = number
+	card.rearranging = rearrange_mode
+	card.mouse_default_cursor_shape = Control.CURSOR_MOVE if rearrange_mode else Control.CURSOR_POINTING_HAND
+	if rearrange_mode:
+		card.drag_pressed.connect(_start_menu_drag)
+	else:
+		card.pressed.connect(func(): play_level(number))
 	card.mouse_entered.connect(func():
-		if screen == "menu" and not color_mode:
+		if screen == "menu" and not color_mode and menu_drag_source == 0:
 			menu_hovered_level = number
 			_set_background_for_level(number, true)
 	)
 	card.custom_minimum_size = Vector2(64, 64)
 	card.size_flags_horizontal = Control.SIZE_FILL
-	card.tooltip_text = "Play level %d" % number
 	var preview := TextureRect.new()
 	preview.position = Vector2.ZERO
 	preview.size = Vector2(64, 64)
@@ -291,31 +336,38 @@ func _level_card(number: int) -> Button:
 	preview.stretch_mode = TextureRect.STRETCH_SCALE
 	preview.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	card.add_child(preview)
-	# The thumbnail is a live offscreen screenshot using the actual board renderer.
-	var viewport := SubViewport.new()
-	viewport.size = Vector2i(240, 240)
-	viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
-	viewport.gui_disable_input = true
-	preview.add_child(viewport)
-	var miniature := PuzzleBoard.new()
-	miniature.size = Vector2(240, 240)
-	miniature.thumbnail_mode = true
-	viewport.add_child(miniature)
-	miniature.configure(store.get_level(number), store.get_color(number), store.get_line_color(number))
-	miniature.locked = true
-	miniature.set_process_input(false)
-	preview.texture = viewport.get_texture()
+	var level := store.get_level(number)
+	var tint := store.get_color(number)
+	var line_tint := store.get_line_color(number)
+	var signature := hash([level.width, level.height, level.tiles, tint.to_html(), line_tint.to_html()])
+	var cached: Dictionary = menu_thumbnail_cache.get(number, {})
+	if cached.get("signature") == signature:
+		preview.texture = cached.texture
+	else:
+		# Render each level once, then release its viewport. Dragging only moves textures.
+		var viewport := SubViewport.new()
+		viewport.size = Vector2i(128, 128)
+		viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+		viewport.gui_disable_input = true
+		preview.add_child(viewport)
+		var miniature := PuzzleBoard.new()
+		miniature.size = Vector2(128, 128)
+		miniature.thumbnail_mode = true
+		viewport.add_child(miniature)
+		miniature.configure(level, tint, line_tint)
+		miniature.locked = true
+		miniature.set_process_input(false)
+		preview.texture = viewport.get_texture()
+		_cache_menu_thumbnail(number, signature, viewport, preview)
 	var number_label := label("%d" % number, 11)
 	number_label.position = Vector2(5, 45)
 	number_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	number_label.add_theme_color_override("font_color", PuzzleBoard.text_color(store.get_color(number)))
 	_outline_label(number_label)
 	card.add_child(number_label)
 	if store.completed.get(str(number), false):
 		var checkmark := label("✓", 18)
 		checkmark.position = Vector2(41, 39)
 		checkmark.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		checkmark.add_theme_color_override("font_color", PuzzleBoard.text_color(store.get_color(number)))
 		_outline_label(checkmark)
 		card.add_child(checkmark)
 	var outline := Panel.new()
@@ -327,6 +379,159 @@ func _level_card(number: int) -> Button:
 	outline.add_theme_stylebox_override("panel", outline_style)
 	card.add_child(outline)
 	return card
+
+func _cache_menu_thumbnail(number: int, signature: int, viewport: SubViewport, preview: TextureRect) -> void:
+	await RenderingServer.frame_post_draw
+	if not is_instance_valid(viewport) or not is_instance_valid(preview):
+		return
+	if not preview.is_inside_tree():
+		return
+	var snapshot := viewport.get_texture().get_image()
+	if snapshot.is_empty():
+		return
+	var texture := ImageTexture.create_from_image(snapshot)
+	menu_thumbnail_cache[number] = {"signature": signature, "texture": texture}
+	preview.texture = texture
+	viewport.queue_free()
+
+func _start_menu_drag(source: int, pointer: Vector2) -> void:
+	if not rearrange_mode or screen != "menu":
+		return
+	_cancel_menu_drag()
+	menu_drag_source = source
+	menu_drag_origin = pointer
+
+func _menu_drag_slots() -> Array[Vector2]:
+	var slots: Array[Vector2] = []
+	for card in menu_cards:
+		slots.append(card.get_parent().global_position + Vector2(card.get_index() * 76, 0))
+	return slots
+
+func _update_menu_drag(pointer: Vector2) -> void:
+	if menu_drag_source == 0 or not rearrange_mode:
+		return
+	if not menu_dragging:
+		if pointer.distance_to(menu_drag_origin) < 6.0:
+			return
+		menu_dragging = true
+		var source_card := menu_cards[menu_drag_source - 1]
+		source_card.modulate.a = 0.0
+		menu_drag_icon = TextureRect.new()
+		menu_drag_icon.texture = (source_card.get_child(0) as TextureRect).texture
+		menu_drag_icon.size = Vector2(64, 64)
+		menu_drag_icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		menu_drag_icon.stretch_mode = TextureRect.STRETCH_SCALE
+		menu_drag_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		menu_drag_icon.modulate.a = 0.9
+		var number_label := label("%d" % menu_drag_source, 11)
+		number_label.position = Vector2(5, 45)
+		number_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_outline_label(number_label)
+		menu_drag_icon.add_child(number_label)
+		add_child(menu_drag_icon)
+		menu_drag_icon.size = Vector2(64, 64)
+	menu_drag_icon.position = pointer - Vector2(32, 32)
+	var slots := _menu_drag_slots()
+	var target := 0
+	var distance := INF
+	for index in range(slots.size()):
+		if not Rect2(slots[index], Vector2(64, 64)).grow(8).has_point(pointer):
+			continue
+		var candidate := pointer.distance_squared_to(slots[index] + Vector2(32, 32))
+		if candidate < distance:
+			distance = candidate
+			target = index + 1
+	if target == menu_drag_source:
+		target = 0
+	var after := target > 0 and pointer.x >= slots[target - 1].x + 32.0
+	if target != menu_drag_target or after != menu_drag_after:
+		menu_drag_target = target
+		menu_drag_after = after
+		_animate_menu_drag_preview(slots)
+
+func _animate_menu_drag_preview(slots: Array[Vector2]) -> void:
+	var order: Array[int] = []
+	for index in range(menu_cards.size()):
+		order.append(index)
+	if menu_drag_target > 0:
+		var source_index := menu_drag_source - 1
+		var target_index := menu_drag_target - 1
+		if rearrange_action == "swap":
+			order[source_index] = target_index
+			order[target_index] = source_index
+		else:
+			var moved: int = order.pop_at(source_index)
+			var insertion := target_index + (1 if menu_drag_after else 0)
+			if source_index < target_index:
+				insertion -= 1
+			order.insert(insertion, moved)
+	var destinations: Array[int] = []
+	destinations.resize(order.size())
+	for slot in range(order.size()):
+		destinations[order[slot]] = slot
+	for index in range(menu_cards.size()):
+		if index == menu_drag_source - 1:
+			continue
+		var card := menu_cards[index]
+		var destination: Vector2 = slots[destinations[index]] - card.get_parent().global_position
+		if menu_drag_destinations.has(index) and (menu_drag_destinations[index] as Vector2).is_equal_approx(destination):
+			continue
+		menu_drag_destinations[index] = destination
+		if menu_drag_tweens.has(index):
+			(menu_drag_tweens[index] as Tween).kill()
+			menu_drag_tweens.erase(index)
+		if card.position.is_equal_approx(destination):
+			continue
+		var tween := create_tween()
+		tween.tween_property(card, "position", destination, 0.16).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		menu_drag_tweens[index] = tween
+
+func _finish_menu_drag(pointer: Vector2) -> void:
+	_update_menu_drag(pointer)
+	var source := menu_drag_source
+	var target := menu_drag_target
+	var after := menu_drag_after
+	var dropped := menu_dragging and target > 0
+	_cancel_menu_drag()
+	if dropped:
+		_rearrange_level(source, target, after)
+
+func _cancel_menu_drag() -> void:
+	for tween in menu_drag_tweens.values():
+		if tween is Tween:
+			tween.kill()
+	menu_drag_tweens.clear()
+	menu_drag_destinations.clear()
+	for card in menu_cards:
+		if is_instance_valid(card) and card.get_parent() != null:
+			card.position = Vector2(card.get_index() * 76, 0)
+			card.modulate.a = 1.0
+	if is_instance_valid(menu_drag_icon):
+		menu_drag_icon.queue_free()
+	menu_drag_icon = null
+	menu_drag_source = 0
+	menu_drag_target = 0
+	menu_drag_after = false
+	menu_dragging = false
+
+func _set_rearrange_action(action: String) -> void:
+	rearrange_action = action
+	show_menu()
+
+func _toggle_rearrange() -> void:
+	if screen != "menu":
+		return
+	rearrange_mode = not rearrange_mode
+	menu_page = 0
+	show_menu()
+
+func _rearrange_level(source: int, target: int, after: bool) -> void:
+	var result := store.rearrange_level(source, target, rearrange_action, after)
+	if result != OK:
+		_show_toast("Levels could not be rearranged: " + error_string(result))
+		return
+	menu_hovered_level = 0
+	show_menu()
 
 func _outline_label(node: Label) -> void:
 	node.add_theme_constant_override("outline_size", 3)
@@ -397,7 +602,7 @@ func _set_background_for_level(number: int, animate: bool = false) -> void:
 			palette_tween.kill()
 		_apply_ui_palette(level_color)
 	if is_instance_valid(background_rect):
-		var target := PuzzleBoard.background_color(level_color)
+		var target := PuzzleBoard.menu_background_color(level_color) if screen == "menu" else PuzzleBoard.background_color(level_color)
 		if background_tween and background_tween.is_running():
 			background_tween.kill()
 		if animate and background_rect.color != target:
@@ -467,6 +672,13 @@ func _complete_level() -> void:
 		play_level(current_level + 1)
 
 func _input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion and menu_drag_source > 0:
+		_update_menu_drag(event.position)
+		return
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and not event.pressed and menu_drag_source > 0:
+		_finish_menu_drag(event.position)
+		get_viewport().set_input_as_handled()
+		return
 	if not event is InputEventKey or event.echo:
 		return
 	var key: int = event.keycode
@@ -474,15 +686,21 @@ func _input(event: InputEvent) -> void:
 		pressed_keys[key] = true
 	else:
 		pressed_keys.erase(key)
+	if key == KEY_ESCAPE and event.pressed:
+		_return_to_menu()
+		get_viewport().set_input_as_handled()
+		return
 	var only_editor_keys := _only_keys([KEY_SHIFT, KEY_Z, KEY_O])
 	var only_color_keys := _only_keys([KEY_SHIFT, KEY_Z, KEY_I])
+	var only_rearrange_keys := _only_keys([KEY_SHIFT, KEY_Z, KEY_U])
 	var editor_chord: bool = event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_O) and only_editor_keys
 	var color_chord: bool = event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_I) and only_color_keys
-	var previous_chord: bool = screen == "play" and not color_mode and event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_LEFT) and _only_keys([KEY_SHIFT, KEY_Z, KEY_LEFT])
-	var next_chord: bool = screen == "play" and not color_mode and event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_RIGHT) and _only_keys([KEY_SHIFT, KEY_Z, KEY_RIGHT])
+	var rearrange_chord: bool = screen == "menu" and event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_U) and only_rearrange_keys
+	var previous_chord: bool = (screen == "play" or screen == "editor") and not color_mode and event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_LEFT) and _only_keys([KEY_SHIFT, KEY_Z, KEY_LEFT])
+	var next_chord: bool = (screen == "play" or screen == "editor") and not color_mode and event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_RIGHT) and _only_keys([KEY_SHIFT, KEY_Z, KEY_RIGHT])
 	var unlock_chord: bool = event.ctrl_pressed and not event.shift_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_M) and _only_keys([KEY_CTRL, KEY_Z, KEY_M])
 	var reset_chord: bool = event.ctrl_pressed and not event.shift_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_N) and _only_keys([KEY_CTRL, KEY_Z, KEY_N])
-	if (editor_chord or color_chord or previous_chord or next_chord or unlock_chord or reset_chord) and event.pressed and not chord_active:
+	if (editor_chord or color_chord or rearrange_chord or previous_chord or next_chord or unlock_chord or reset_chord) and event.pressed and not chord_active:
 		chord_active = true
 		pending_undo = false
 		get_viewport().set_input_as_handled()
@@ -490,16 +708,32 @@ func _input(event: InputEvent) -> void:
 			_toggle_editor()
 		elif color_chord:
 			_toggle_color_editor()
-		elif previous_chord and current_level > 1:
-			play_level(current_level - 1)
+		elif rearrange_chord:
+			_toggle_rearrange()
+		elif previous_chord:
+			_navigate_level(-1)
 		elif next_chord:
-			play_level(current_level + 1)
+			_navigate_level(1)
 		elif unlock_chord or reset_chord:
 			_change_completion(unlock_chord)
 		return
-	if not editor_chord and not color_chord and not previous_chord and not next_chord and not unlock_chord and not reset_chord:
+	if not editor_chord and not color_chord and not rearrange_chord and not previous_chord and not next_chord and not unlock_chord and not reset_chord:
 		chord_active = false
 	if screen == "editor" and not color_mode:
+		if key in [KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN] and event.pressed and not editor_playtesting and not event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed:
+			var direction := Vector2i.ZERO
+			match key:
+				KEY_LEFT:
+					direction = Vector2i.LEFT
+				KEY_RIGHT:
+					direction = Vector2i.RIGHT
+				KEY_UP:
+					direction = Vector2i.UP
+				KEY_DOWN:
+					direction = Vector2i.DOWN
+			_shift_editor_tiles(direction)
+			get_viewport().set_input_as_handled()
+			return
 		if key == KEY_SPACE and event.pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed:
 			_toggle_editor_playtest()
 			get_viewport().set_input_as_handled()
@@ -516,16 +750,39 @@ func _input(event: InputEvent) -> void:
 			_editor_redo()
 			get_viewport().set_input_as_handled()
 
+func _navigate_level(step: int) -> void:
+	if screen == "play":
+		if current_level + step >= 1:
+			play_level(current_level + step)
+	elif screen == "editor":
+		var next := editor_level + step
+		if next < 1 or next > 100000:
+			return
+		if editor_playtesting:
+			_toggle_editor_playtest()
+		_select_editor_level(float(next))
+
+func _return_to_menu() -> void:
+	if screen == "menu" and not rearrange_mode and not color_mode:
+		return
+	rearrange_mode = false
+	color_mode = false
+	editor_playtesting = false
+	menu_hovered_level = 0
+	menu_page = 0
+	return_screen = "menu"
+	pending_undo = false
+	chord_active = false
+	show_menu()
+
 func _change_completion(unlock: bool) -> void:
 	var result := store.complete_first(99) if unlock else store.reset_completion_to_first()
 	if result != OK:
 		_show_toast("Progress could not be saved: " + error_string(result))
 		return
-	if screen == "menu":
-		menu_hovered_level = 0
-		show_menu()
-	else:
-		_show_toast("Levels 1–99 unlocked." if unlock else "Progress reset to level 2.")
+	menu_page = 0
+	menu_hovered_level = 0
+	show_menu()
 
 func _only_keys(allowed: Array) -> bool:
 	for key in pressed_keys:
@@ -604,19 +861,11 @@ func _show_editor() -> void:
 	var number_input := _spin(editor_level, 1, 100000)
 	editor_number_input = number_input
 	controls.add_child(number_input)
-	number_input.value_changed.connect(func(value: float):
-		if restoring_editor:
-			return
-		editor_level = int(value)
-		_set_board_tint(store.get_color(editor_level))
-	)
-	controls.add_child(button("Load level", func():
-		_finish_stroke()
-		_record_edit()
-		editor_data = store.get_level(editor_level)
-		_sync_editor()
-		editor_message.text = "Loaded level %d." % editor_level
-	))
+	number_input.value_changed.connect(_select_editor_level)
+	var layout_transfer := HBoxContainer.new()
+	controls.add_child(layout_transfer)
+	layout_transfer.add_child(button("Copy", _copy_editor_layout))
+	layout_transfer.add_child(button("Paste", _paste_editor_layout))
 	controls.add_child(button("Insert level here", _insert_editor_level))
 	controls.add_child(button("Delete saved level", _delete_editor_level))
 	controls.add_child(label("GRID DIMENSIONS", 12, MUTED))
@@ -629,6 +878,17 @@ func _show_editor() -> void:
 	dimensions.add_child(height_input)
 	width_input.value_changed.connect(func(_v): _resize_editor())
 	height_input.value_changed.connect(func(_v): _resize_editor())
+	if editor_generation_moves < 2:
+		editor_generation_moves = mini(editor_level + 26, int(editor_data.width) * int(editor_data.height))
+	controls.add_child(label("MOVES (TILES IN LINE)", 12, MUTED))
+	move_input = _spin(editor_generation_moves, 2, 32768)
+	controls.add_child(move_input)
+	move_input.value_changed.connect(func(value: float): editor_generation_moves = int(value))
+	controls.add_child(label("REQUIRED CROSSOVERS", 12, MUTED))
+	crossover_input = _spin(editor_required_crossings, 0, 16384)
+	controls.add_child(crossover_input)
+	crossover_input.value_changed.connect(func(value: float): editor_required_crossings = int(value))
+	controls.add_child(button("Generate random level", _generate_editor_level))
 	controls.add_child(label("PAINT TILES", 12, MUTED))
 	brush_buttons.clear()
 	for value in range(3):
@@ -644,6 +904,7 @@ func _show_editor() -> void:
 	edit_actions.add_child(button("Undo", _editor_undo))
 	edit_actions.add_child(button("Redo", _editor_redo))
 	controls.add_child(label("Ctrl + Z / Ctrl + Y\nEach paint stroke is one edit.", 12, MUTED))
+	controls.add_child(label("Arrow keys shift tiles by one; edges wrap.", 12, MUTED))
 	editor_message = label("Paint, then save to replace\nthe generated puzzle.", 13, ACCENT)
 	editor_message.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	controls.add_child(editor_message)
@@ -713,11 +974,98 @@ func _reset_all_white() -> void:
 	board.refresh()
 	editor_message.text = "Board cleared. Paint dark tiles before saving."
 
+func _generate_editor_level() -> void:
+	if editor_playtesting:
+		return
+	board._end()
+	board._end_light()
+	_finish_stroke()
+	var width := int(width_input.value)
+	var height := int(height_input.value)
+	var moves := int(move_input.value)
+	if moves > width * height + editor_required_crossings:
+		editor_message.text = "%d moves need a larger grid or more crossovers." % moves
+		return
+	if moves - editor_required_crossings < 2:
+		editor_message.text = "Too many crossovers for %d moves." % moves
+		return
+	var generated := Puzzle.generate(editor_level, Vector2i(width, height), editor_required_crossings, randi(), moves, true)
+	if generated.is_empty():
+		editor_message.text = "No line found with %d moves and exactly %d crossovers. Try again or change settings." % [moves, editor_required_crossings]
+		return
+	var layout := {"width": int(generated.width), "height": int(generated.height), "tiles": generated.tiles.duplicate()}
+	if editor_data != layout:
+		_record_edit()
+		editor_data = layout
+		_sync_editor()
+	var unique_cells: Dictionary = {}
+	for cell in generated.solution:
+		unique_cells[cell] = true
+	var used: int = generated.solution.size() - unique_cells.size()
+	editor_message.text = "Generated %d moves with exactly %d crossovers. Save to keep it." % [moves, used]
+
+func _copy_editor_layout() -> void:
+	board._end()
+	board._end_light()
+	_finish_stroke()
+	copied_editor_data = editor_data.duplicate(true)
+	editor_message.text = "Layout copied. Select a level number and paste."
+
+func _select_editor_level(value: float) -> void:
+	if restoring_editor or editor_level == int(value):
+		return
+	board._end()
+	board._end_light()
+	_finish_stroke()
+	editor_level = int(value)
+	editor_data = store.get_level(editor_level)
+	undo_stack.clear()
+	redo_stack.clear()
+	_sync_editor()
+	editor_message.text = "Level %d loaded. Copy and paste to reuse a layout." % editor_level
+
+func _paste_editor_layout() -> void:
+	if copied_editor_data.is_empty():
+		editor_message.text = "Copy a layout first."
+		return
+	board._end()
+	board._end_light()
+	_finish_stroke()
+	if editor_data == copied_editor_data:
+		editor_message.text = "This layout is already pasted."
+		return
+	_record_edit()
+	editor_data = copied_editor_data.duplicate(true)
+	_sync_editor()
+	editor_message.text = "Layout pasted into level %d. Save to keep it." % editor_level
+
 func _record_edit() -> void:
 	undo_stack.append(editor_data.duplicate(true))
 	if undo_stack.size() > 200:
 		undo_stack.pop_front()
 	redo_stack.clear()
+
+func _shift_editor_tiles(direction: Vector2i) -> void:
+	if screen != "editor" or color_mode or editor_playtesting:
+		return
+	board._end()
+	board._end_light()
+	_finish_stroke()
+	var width := int(editor_data.width)
+	var height := int(editor_data.height)
+	var shifted: Array = []
+	shifted.resize(width * height)
+	for y in range(height):
+		for x in range(width):
+			var destination_x := (x + direction.x + width) % width
+			var destination_y := (y + direction.y + height) % height
+			shifted[destination_y * width + destination_x] = editor_data.tiles[y * width + x]
+	if shifted == editor_data.tiles:
+		return
+	_record_edit()
+	editor_data.tiles = shifted
+	_sync_editor()
+	editor_message.text = "Shifted all tiles one space. Save level to keep it."
 
 func _paint_cell(cell: int) -> void:
 	_paint_value(cell, brush)
@@ -1000,14 +1348,14 @@ func _color_picker_changed(color: Color) -> void:
 	else:
 		color_draft = color
 		if not line_custom_draft:
-			line_draft = PuzzleBoard.line_color(color_draft)
+			line_draft = LevelStore.DEFAULT_LINE_COLOR
 	_update_color_preview()
 	if is_instance_valid(board) and LevelStore.group_start(color_level) == LevelStore.group_start(editor_level if screen == "editor" else current_level):
 		_set_board_tint(color_draft, line_draft)
 
 func _reset_line_draft() -> void:
 	line_custom_draft = false
-	line_draft = PuzzleBoard.line_color(color_draft)
+	line_draft = LevelStore.DEFAULT_LINE_COLOR
 	_update_color_controls()
 	if is_instance_valid(board) and LevelStore.group_start(color_level) == LevelStore.group_start(editor_level if screen == "editor" else current_level):
 		_set_board_tint(color_draft, line_draft)

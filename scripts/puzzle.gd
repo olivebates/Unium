@@ -1,6 +1,8 @@
 class_name Puzzle
 extends RefCounted
 
+const MAX_GENERATED_CROSSINGS := 3
+
 static func cell_vector(cell: int, width: int) -> Vector2i:
 	return Vector2i(cell % width, cell / width)
 
@@ -33,7 +35,12 @@ static func can_append(path: Array, cell: int, width: int, height: int) -> bool:
 	if visits >= 2:
 		return false
 	var index := path.find(cell)
-	if index == 0 or index == path.size() - 1:
+	if index == 0:
+		# The start has an outgoing edge but no incoming edge. Enter across it,
+		# never from behind or along the edge the line first used.
+		var first_out := cell_vector(path[1], width) - cell_vector(cell, width)
+		return first_out.x * direction.x + first_out.y * direction.y == 0
+	if index == path.size() - 1:
 		return false
 	var first_in := cell_vector(cell, width) - cell_vector(path[index - 1], width)
 	var first_out := cell_vector(path[index + 1], width) - cell_vector(cell, width)
@@ -47,8 +54,7 @@ static func resolved_tiles(tiles: Array, path: Array) -> Array:
 	return result
 
 static func is_complete(tiles: Array, path: Array) -> bool:
-	# Finish after leaving a crossing, so both traversals really are straight.
-	return not path.is_empty() and path.count(path.back()) == 1 and not resolved_tiles(tiles, path).has(1)
+	return not path.is_empty() and not resolved_tiles(tiles, path).has(1)
 
 static func palette(level: int) -> Color:
 	# Curated hues repeat in a predictable five-set cycle; level layout still uses its seed.
@@ -56,40 +62,64 @@ static func palette(level: int) -> Color:
 	var group := int((level - 1) / 5)
 	return Color.from_hsv(HUES[group % HUES.size()], 1.0, 1.0)
 
-static func generate(level: int) -> Dictionary:
+static func generate(level: int, fixed_dimensions: Vector2i = Vector2i.ZERO, max_crossings: int = MAX_GENERATED_CROSSINGS, random_seed: int = -1, requested_moves: int = 0, exact_crossings: bool = false) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
-	rng.seed = level
-	var moves := level + 6
-	var maximum_side := maxi(7, ceili(sqrt(float(moves))))
-	var dimensions: Array[Vector2i] = []
-	for w in range(3, maximum_side + 1):
-		for h in range(3, maximum_side + 1):
-			if w * h >= moves:
-				dimensions.append(Vector2i(w, h))
-	var dim := dimensions[rng.randi_range(0, dimensions.size() - 1)]
-	var width := dim.x
-	var height := dim.y
+	rng.seed = level if random_seed < 0 else random_seed
+	var moves := requested_moves if requested_moves > 0 else level + 26
+	var width := fixed_dimensions.x
+	var height := fixed_dimensions.y
+	if width >= 3 and height >= 3:
+		# An untouched editor move count is shortened to fit a smaller board.
+		if requested_moves == 0:
+			moves = mini(moves, width * height)
+	else:
+		var maximum_side := maxi(7, ceili(sqrt(float(moves))))
+		var dimensions: Array[Vector2i] = []
+		for w in range(3, maximum_side + 1):
+			for h in range(3, maximum_side + 1):
+				if w * h >= moves:
+					dimensions.append(Vector2i(w, h))
+		var dim := dimensions[rng.randi_range(0, dimensions.size() - 1)]
+		width = dim.x
+		height = dim.y
+	if exact_crossings and max_crossings > width * height:
+		return {}
+	var crossing_limit := clampi(max_crossings, 0, width * height)
+	if moves < 2 or moves > width * height + crossing_limit or (exact_crossings and moves - crossing_limit < 2):
+		return {}
 	var solution: Array = []
+	var found_solution := false
 	# Bounded randomized depth-first search; every step uses the player's rules.
 	for attempt in range(8):
 		solution = [rng.randi_range(0, width * height - 1)]
-		var choices: Array = [_shuffled(neighbors(solution.back(), width, height), rng)]
+		var crossings := 0
+		var choices: Array = [_ordered_neighbors(solution, width, height, rng)]
 		var budget := 2200
 		while not solution.is_empty() and budget > 0:
 			budget -= 1
-			if solution.size() == moves and solution.count(solution.back()) == 1:
+			if solution.size() == moves and solution.count(solution.back()) == 1 and (not exact_crossings or crossings == crossing_limit):
 				break
 			if choices.back().is_empty() or solution.size() == moves:
-				solution.pop_back()
+				var removed: int = solution.pop_back()
+				if solution.has(removed):
+					crossings -= 1
 				choices.pop_back()
 				continue
 			var next: int = choices.back().pop_back()
+			var is_crossing := solution.has(next)
+			if is_crossing and crossings >= crossing_limit:
+				continue
 			if can_append(solution, next, width, height):
 				solution.append(next)
-				choices.append(_shuffled(neighbors(next, width, height), rng))
-		if solution.size() == moves and solution.count(solution.back()) == 1:
+				if is_crossing:
+					crossings += 1
+				choices.append(_ordered_neighbors(solution, width, height, rng))
+		if solution.size() == moves and solution.count(solution.back()) == 1 and (not exact_crossings or crossings == crossing_limit):
+			found_solution = true
 			break
-	if solution.size() != moves or solution.count(solution.back()) != 1:
+	if not found_solution:
+		if moves > width * height or (exact_crossings and crossing_limit > 0):
+			return {}
 		# Guaranteed solvable fallback, mirrored and transposed by the seed.
 		solution = []
 		var flip_x := rng.randf() < 0.5
@@ -113,7 +143,7 @@ static func generate(level: int) -> Dictionary:
 	tiles = resolved_tiles(tiles, solution)
 	# Separate connected islands of 2–4 neutral tiles, touching a remaining dark tile.
 	var gray: Array[int] = []
-	var groups := maxi(1, int(width * height / 15))
+	var groups := mini(maxi(1, int(width * height / 15)), maxi(1, int(moves / 8)))
 	for group in range(groups):
 		for attempt in range(50):
 			var seed_cell := rng.randi_range(0, tiles.size() - 1)
@@ -152,3 +182,15 @@ static func _shuffled(values: Array, rng: RandomNumberGenerator) -> Array:
 		result[i] = result[j]
 		result[j] = swap
 	return result
+
+static func _ordered_neighbors(path: Array, width: int, height: int, rng: RandomNumberGenerator) -> Array:
+	var candidates := _shuffled(neighbors(path.back(), width, height), rng)
+	# The search pops from the end. Try legal overpasses first when available.
+	var crossings: Array = []
+	var other: Array = []
+	for cell in candidates:
+		if path.has(cell) and can_append(path, cell, width, height):
+			crossings.append(cell)
+		else:
+			other.append(cell)
+	return other + crossings

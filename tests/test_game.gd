@@ -16,12 +16,19 @@ func check(condition: bool, message: String) -> void:
 
 func run() -> void:
 	var started := Time.get_ticks_msec()
+	var generated_crossings := 0
 	for number in range(1, 151):
 		var level := Puzzle.generate(number)
+		var unique_cells: Dictionary = {}
+		for cell in level.solution:
+			unique_cells[cell] = true
+		var crossing_count: int = level.solution.size() - unique_cells.size()
+		generated_crossings += crossing_count
+		check(crossing_count <= Puzzle.MAX_GENERATED_CROSSINGS, "Generated solution has at most three crossings in %d" % number)
 		check(level == Puzzle.generate(number), "Seed %d is deterministic" % number)
-		check(level.solution.size() == number + 6, "Exact solution length for %d" % number)
+		check(level.solution.size() == number + 26, "Exact solution length for %d" % number)
 		check(level.width >= 3 and level.height >= 3, "Minimum dimensions")
-		if number <= 43:
+		if number <= 23:
 			check(level.width <= 7 and level.height <= 7, "Original board size range")
 		else:
 			check(level.width > 7 or level.height > 7, "Larger boards preserve growing solutions")
@@ -50,6 +57,39 @@ func run() -> void:
 				cursor += 1
 			check(component.size() >= 2 and component.size() <= 4, "Gray component size 2–4")
 			check(touches, "Gray component touches a dark tile")
+	check(generated_crossings > 0, "Generated paths use legal self-crossings")
+	print("Generated crossings across 150 levels: %d" % generated_crossings)
+	for settings in [[Vector2i(3, 3), 0, 41], [Vector2i(5, 6), 2, 42], [Vector2i(7, 7), 8, 43]]:
+		var dimensions: Vector2i = settings[0]
+		var limit: int = settings[1]
+		var seed: int = settings[2]
+		var custom := Puzzle.generate(1, dimensions, limit, seed)
+		check(custom == Puzzle.generate(1, dimensions, limit, seed), "Editor generation is repeatable with a seed")
+		check(custom.width == dimensions.x and custom.height == dimensions.y and custom.solution.size() <= dimensions.x * dimensions.y, "Editor generation respects the selected dimensions")
+		var custom_path: Array = []
+		var visited: Dictionary = {}
+		for cell in custom.solution:
+			check(Puzzle.can_append(custom_path, cell, dimensions.x, dimensions.y), "Editor generator follows legal moves")
+			custom_path.append(cell)
+			visited[cell] = true
+		check(custom_path.size() - visited.size() <= limit, "Editor generator respects its crossover limit")
+		check(Puzzle.is_complete(custom.tiles, custom_path), "Editor generator creates a solvable board")
+	var generous := Puzzle.generate(1, Vector2i(7, 7), 8, 12)
+	var generous_unique: Dictionary = {}
+	for cell in generous.solution:
+		generous_unique[cell] = true
+	check(generous.solution.size() - generous_unique.size() > Puzzle.MAX_GENERATED_CROSSINGS, "Editor setting can allow more crossings than normal levels")
+	var exact := Puzzle.generate(1, Vector2i(3, 3), 0, 41, 7)
+	check(exact.solution.size() == 7 and Puzzle.is_complete(exact.tiles, exact.solution), "Editor move count sets the exact solution length")
+	check(Puzzle.generate(1, Vector2i(3, 3), 0, 41, 10).is_empty(), "Impossible move counts fail without producing a shorter puzzle")
+	var crossed_length := Puzzle.generate(1, Vector2i(5, 5), 1, 1, 26)
+	check(crossed_length.solution.size() == 26 and Puzzle.is_complete(crossed_length.tiles, crossed_length.solution), "Editor can use a crossing to exceed the board's tile count")
+	var exactly_three := Puzzle.generate(8, Vector2i(6, 7), 3, 1, 34, true)
+	var three_unique: Dictionary = {}
+	for cell in exactly_three.solution:
+		three_unique[cell] = true
+	check(exactly_three.solution.size() == 34 and exactly_three.solution.size() - three_unique.size() == 3 and Puzzle.is_complete(exactly_three.tiles, exactly_three.solution), "Editor generation uses exactly the requested three crossovers")
+	check(Puzzle.generate(1, Vector2i(3, 3), 10, 41, 7, true).is_empty(), "Impossible exact crossover counts produce no level")
 	for number in range(1, 30):
 		if number % 5 != 0:
 			check(Puzzle.palette(number) == Puzzle.palette(number + 1), "Five-level palette block")
@@ -69,19 +109,27 @@ func run() -> void:
 	all_light.fill(0)
 	var dark := Puzzle.resolved_tiles(all_light, crossing)
 	check(dark[7] == 0, "Crossed tile flips back")
-	check(not Puzzle.is_complete(dark, crossing), "Cannot finish mid-crossing")
+	check(Puzzle.is_complete(dark, crossing), "A light tile at a crossed endpoint can finish a puzzle")
 	check(not Puzzle.can_append([0, 1, 6, 7], 1, 5, 5), "Cannot cross a corner")
-	check(not Puzzle.can_append([0, 1, 6, 5], 0, 5, 5), "Cannot revisit start")
+	var start_crossing: Array = [4, 5, 8, 7, 6, 3, 0, 1]
+	check(Puzzle.can_append(start_crossing, 4, 3, 3), "Can cross the start perpendicular to its first edge")
+	start_crossing.append(4)
+	check(Puzzle.can_append(start_crossing, 7, 3, 3) and not Puzzle.can_append(start_crossing, 3, 3, 3), "Crossing the start must continue straight")
+	check(not Puzzle.can_append([4, 5, 8, 7, 6, 3], 4, 3, 3), "Cannot enter the start from behind")
+	var start_layout := Puzzle.resolved_tiles([0, 0, 0, 0, 0, 0, 0, 0, 0], start_crossing)
+	check(start_layout[4] == 0 and Puzzle.is_complete(start_layout, start_crossing), "An overlapped start stays light and counts toward completion")
 	check(not Puzzle.can_append([4], 5, 5, 5), "No row wrapping")
 	check(Puzzle.resolved_tiles([2, 1, 0], [0, 1, 2]) == [2, 0, 1], "Gray is invariant")
 	var hue := Color.from_hsv(0.62, 0.25, 0.82)
 	var light_color := PuzzleBoard.tile_color(0, hue)
 	var dark_color := PuzzleBoard.tile_color(1, hue)
 	var background := PuzzleBoard.background_color(hue)
+	var menu_background := PuzzleBoard.menu_background_color(hue)
 	check(light_color.s <= 0.601 and dark_color.s <= 0.701, "Tile saturation stays within the soft palette")
 	check(PuzzleBoard.luminance(light_color) > PuzzleBoard.luminance(dark_color) * 3.0, "Light and dark tiles stay visually distinct")
 	check(is_equal_approx(light_color.h, dark_color.h), "Light and dark tiles share the base hue")
 	check(is_equal_approx(background.s, 0.25) and background.v < 0.25, "Background is dark and softly tinted")
+	check(is_equal_approx(menu_background.h, hue.h) and absf(PuzzleBoard.luminance(menu_background) - PuzzleBoard.luminance(background)) < 0.001, "Menu background uses the level's main hue at the same darkness as play")
 	check(is_equal_approx(PuzzleBoard.line_color(hue).h, fposmod(hue.h + 2.0 / 12.0, 1.0)), "Cool purple line shifts 60 degrees toward warmer magenta")
 	check(is_equal_approx(PuzzleBoard.line_color(Puzzle.palette(1)).h, fposmod(Puzzle.palette(1).h - 2.0 / 12.0, 1.0)), "Mint line shifts 60 degrees toward warmer yellow")
 	check(is_equal_approx(PuzzleBoard.line_color(Puzzle.palette(6)).h, fposmod(Puzzle.palette(6).h - 2.0 / 12.0, 1.0)), "Sky line shifts 60 degrees toward warmer green")
@@ -102,6 +150,7 @@ func run() -> void:
 	main.store.colors.clear()
 	main.store.line_colors.clear()
 	# Check the whole hue wheel, including manually chosen colors.
+	main.screen = "play"
 	for degrees in range(0, 360, 15):
 		var sample := Color.from_hsv(degrees / 360.0, 1.0, 1.0)
 		main._apply_ui_palette(sample)
@@ -118,6 +167,16 @@ func run() -> void:
 		var primary_fill: Color = main.theme.get_stylebox("normal", "PrimaryButton").bg_color
 		var secondary_fill: Color = main.theme.get_stylebox("normal", "Button").bg_color
 		check(PuzzleBoard.luminance(primary_fill) > PuzzleBoard.luminance(secondary_fill) * 1.5, "Primary buttons stand out from secondary buttons")
+	main.screen = "menu"
+	for degrees in range(0, 360, 15):
+		var sample := Color.from_hsv(degrees / 360.0, 1.0, 1.0)
+		main._apply_ui_palette(sample)
+		var menu_ink := PuzzleBoard.menu_text_color(sample)
+		check(is_equal_approx(main.palette_text.h, sample.h) and is_equal_approx(main.palette_button.h, sample.h), "Menu text and buttons follow the selected level's main hue")
+		for kind in ["Button", "PrimaryButton"]:
+			for state in ["normal", "hover", "pressed"]:
+				var fill: Color = main.theme.get_stylebox(state, kind).bg_color
+				check((PuzzleBoard.luminance(menu_ink) + 0.05) / (PuzzleBoard.luminance(fill) + 0.05) >= 4.5, "Menu buttons remain readable across hues")
 	main._apply_ui_palette(main.store.get_color(1))
 	main.play_level(1)
 	await create_timer(0.35).timeout
@@ -131,12 +190,12 @@ func run() -> void:
 	check(main.theme.get_color("font_color", "Label").is_equal_approx(PuzzleBoard.text_color(main.store.get_color(1))), "Play text uses the first split-complementary hue")
 	check((main.theme.get_stylebox("normal", "Button") as StyleBoxFlat).bg_color.is_equal_approx(PuzzleBoard.button_color(main.store.get_color(1))), "Secondary buttons use the subdued split-complementary hue")
 	check(main.theme.get_color("font_shadow_color", "Label").a > 0.0, "Text has a shadow")
-	check(ProjectSettings.get_setting("display/window/size/mode") == 3, "Game starts fullscreen")
+	check(ProjectSettings.get_setting("display/window/stretch/mode") == "canvas_items" and ProjectSettings.get_setting("display/window/stretch/aspect") == "expand", "Game layout stretches to fill fullscreen")
 	check(main.content.get_child(2) is HBoxContainer and (main.content.get_child(2) as HBoxContainer).get_child_count() == 2, "Reset line is inline with All puzzles")
 	check(main.background_rect.color == PuzzleBoard.background_color(main.store.get_color(1)), "Entire play screen uses the level background")
 	check((main.board_panel.get_theme_stylebox("panel") as StyleBoxFlat).bg_color == main.background_rect.color, "Play area shares the same background")
 	var b: PuzzleBoard = main.board
-	check(b.line.default_color == PuzzleBoard.line_color(main.store.get_color(1)) and b.start_dot.color == b.line.default_color and b.line_group.modulate.a == 1.0, "Line and start marker use the opaque warm analogous color")
+	check(b.line.default_color == LevelStore.DEFAULT_LINE_COLOR and b.start_dot.color == b.line.default_color and b.line_group.modulate.a == 1.0, "Line and start marker use the saved area-six fallback color")
 	check(b.line_shadow.default_color.a > 0.0 and b.line_shadow.position.y > 0.0, "Line has a raised shadow")
 	b.configure({"width": 5, "height": 5, "tiles": all_light}, Color.WHITE)
 	b._begin(b.center(5))
@@ -216,6 +275,40 @@ func run() -> void:
 	await process_frame
 	check(main.screen == "editor", "Editor opens")
 	var original: Dictionary = main.editor_data.duplicate(true)
+	main._copy_editor_layout()
+	main.editor_number_input.value = 2
+	var destination: Dictionary = main.editor_data.duplicate(true)
+	check(main.editor_level == 2 and destination != original, "Changing the editor level number loads that layout")
+	main._paste_editor_layout()
+	check(main.editor_data == original and main.undo_stack.size() == 1, "Paste copies dimensions and tiles to the selected level as one edit")
+	main._editor_undo()
+	check(main.editor_data == destination, "Undo restores the destination layout before paste")
+	main._editor_redo()
+	check(main.editor_data == original, "Redo restores the pasted layout")
+	main.editor_number_input.value = 1
+	check(main.editor_data == original and main.undo_stack.is_empty(), "Selecting another level loads it and resets level-specific history")
+	var before_shift: Dictionary = main.editor_data.duplicate(true)
+	var shift_fixture := {"width": 4, "height": 3, "tiles": [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]}
+	main.editor_data = shift_fixture.duplicate(true)
+	main._sync_editor()
+	for direction in [
+		[KEY_RIGHT, [0, 0, 1, 2, 1, 1, 2, 0, 2, 2, 0, 1]],
+		[KEY_LEFT, [1, 2, 0, 0, 2, 0, 1, 1, 0, 1, 2, 2]],
+		[KEY_UP, [1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0]],
+		[KEY_DOWN, [2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1]]
+	]:
+		key(main, direction[0], true)
+		key(main, direction[0], false)
+		check(main.editor_data.tiles == direction[1] and main.undo_stack.size() == 1, "Arrow key shifts tiles one cell with wraparound")
+		main._editor_undo()
+		check(main.editor_data.tiles == shift_fixture.tiles, "Undo restores the tile shift")
+		main._editor_redo()
+		check(main.editor_data.tiles == direction[1], "Redo reapplies the tile shift")
+		main._editor_undo()
+	main.editor_data = before_shift
+	main.undo_stack.clear()
+	main.redo_stack.clear()
+	main._sync_editor()
 	var dark_cell: int = original.tiles.find(1)
 	var right_press := InputEventMouseButton.new()
 	right_press.button_index = MOUSE_BUTTON_RIGHT
@@ -265,11 +358,37 @@ func run() -> void:
 	check(main.editor_data.tiles == before_white_reset, "White reset can be undone")
 	main._editor_redo()
 	check(not main.editor_data.tiles.has(1) and not main.editor_data.tiles.has(2), "White reset can be redone")
+	var before_generated: Dictionary = main.editor_data.duplicate(true)
+	var saved_before_generation: Dictionary = main.store.levels.duplicate(true)
+	var history_before_generation: int = main.undo_stack.size()
+	main.crossover_input.value = 0
+	main.move_input.value = int(main.editor_data.width) * int(main.editor_data.height) + 1
+	main._generate_editor_level()
+	check(main.editor_data == before_generated and main.undo_stack.size() == history_before_generation and main.editor_message.text.contains("larger grid"), "Impossible editor move counts preserve the draft and undo history")
+	main.move_input.value = 7
+	main._generate_editor_level()
+	check(main.editor_data.width == before_generated.width and main.editor_data.height == before_generated.height and main.editor_data.tiles.has(1), "Generate fills the editor at its current dimensions")
+	check(main.undo_stack.size() == history_before_generation + 1 and main.store.levels == saved_before_generation, "Generated editor layout is one unsaved undoable edit")
+	check(main.editor_message.text.contains("Generated 7 moves with exactly 0 crossovers"), "Editor uses and reports the chosen move and exact crossover count")
+	main._editor_undo()
+	check(main.editor_data == before_generated, "Undo restores the editor layout before generation")
+	main._editor_redo()
+	check(main.editor_data.tiles.has(1), "Redo restores the generated layout")
+	main._editor_undo()
+	main.crossover_input.value = 3
+	main.move_input.value = 2
+	main._generate_editor_level()
+	check(main.editor_data == before_generated and main.editor_message.text.contains("Too many crossovers"), "Impossible exact crossover request leaves the editor draft unchanged")
+	main.crossover_input.value = 0
+	main.move_input.value = 7
 	var before_playtest: Dictionary = main.editor_data.duplicate(true)
 	var before_playtest_history: int = main.undo_stack.size()
 	key(main, KEY_SPACE, true)
-	check(main.editor_playtesting and not main.board.editing and not main.width_input.editable, "Space starts editor playtest and disables building controls")
+	check(main.editor_playtesting and not main.board.editing and not main.width_input.editable and not main.move_input.editable and not main.crossover_input.editable, "Space starts editor playtest and disables building controls")
 	key(main, KEY_SPACE, false)
+	key(main, KEY_LEFT, true)
+	key(main, KEY_LEFT, false)
+	check(main.editor_data == before_playtest and main.undo_stack.size() == before_playtest_history, "Arrow keys leave the draft unchanged during playtest")
 	main.board.configure({"width": 3, "height": 3, "tiles": [1, 1, 0, 0, 0, 0, 0, 0, 0]}, Color.RED)
 	main.board._begin(main.board.center(0))
 	main.board._trace(main.board.center(1))
@@ -301,7 +420,7 @@ func run() -> void:
 	check(main.store.get_line_color(21).is_equal_approx(preview_line) and absf(main.store.get_color(21).h - copied_tile_hue) < 0.005, "Pasted color scheme saves for the destination area")
 	main._load_color_drafts(8)
 	main._reset_line_draft()
-	check(not main.line_custom_draft and main.color_preview.line.default_color.is_equal_approx(PuzzleBoard.line_color(main.color_draft)), "Suggested line color can be restored")
+	check(not main.line_custom_draft and main.color_preview.line.default_color.is_equal_approx(LevelStore.DEFAULT_LINE_COLOR), "Saved area-six color is the suggested default")
 	main._save_color_selection()
 	check(not main.store.line_colors.has(str(LevelStore.group_start(main.color_level))), "Suggested line color removes the area override")
 	key(main, KEY_I, false, false, true)
@@ -337,7 +456,7 @@ func run() -> void:
 		check(main.store.get_color(member) == main.store.get_color(6), "Second group shares its color")
 	check(absf(main.store.get_color(6).h - Color("477fdb").h) < 0.005, "Saved color preserves the chosen hue")
 	check(main.store.get_color(11) == Puzzle.palette(11), "Adjacent group stays independent")
-	check(main.store.get_line_color(11).is_equal_approx(PuzzleBoard.line_color(main.store.get_color(11))), "Unedited areas use the warm analogous line color")
+	check(main.store.get_line_color(11).is_equal_approx(LevelStore.DEFAULT_LINE_COLOR), "Unedited areas use the saved area-six line color")
 	check(main.store.mark_complete(1) == OK, "Progress save succeeds")
 	var reloaded := LevelStore.new()
 	check(reloaded.get_level(2).tiles == custom.tiles, "Custom level survives reload")
@@ -414,10 +533,12 @@ func run() -> void:
 		main.store.completed[str(number)] = true
 	main.show_menu()
 	await process_frame
-	check(main.background_rect.color == PuzzleBoard.background_color(main.store.get_color(6)), "Menu defaults to the current unsolved level color")
-	var level_cards := root.find_children("", "Button", true, false).filter(func(node): return node.tooltip_text.begins_with("Play level "))
+	check(main.background_rect.color == PuzzleBoard.menu_background_color(main.store.get_color(6)), "Menu defaults to the current unsolved level's main hue")
+	check(main.palette_text.is_equal_approx(PuzzleBoard.menu_text_color(main.store.get_color(6))) and main.palette_button.is_equal_approx(PuzzleBoard.menu_button_color(main.store.get_color(6))), "Menu text and buttons use the selected level's main hue")
+	var level_cards: Array[Button] = main.menu_cards.duplicate()
 	check(not level_cards.is_empty() and level_cards[0].size == Vector2(64, 64), "Menu level cards are 64 by 64")
-	check(main.menu_rows.get_child_count() == 1 and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_CENTER, "Short menu row is centered")
+	check(level_cards.all(func(node): return node.tooltip_text.is_empty()), "Level cards do not show hover popups")
+	check(main.menu_rows.get_child_count() == 1 and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_BEGIN, "Menu rows align their cards from the left")
 	check(main.content.get_child(0) is HBoxContainer and (main.content.get_child(0) as HBoxContainer).get_children().any(func(node): return node is Button and node.text == "Play level 6   →"), "Play button sits beside the title")
 	check((main.content.get_child(0) as HBoxContainer).get_child(0).text == "H e a r t h l i n e", "Cozy menu title has spaced letters")
 	check(main.content.get_child(0).get_child(2).theme_type_variation == "PrimaryButton", "Play level uses the prominent button style")
@@ -425,7 +546,7 @@ func run() -> void:
 	check(thumbnail.position == Vector2.ZERO and thumbnail.size == Vector2(64, 64), "Screenshot fills the whole menu button")
 	var text_labels: Array = level_cards[0].get_children().filter(func(node): return node is Label)
 	check(text_labels[0].get_theme_constant("outline_size") == 3 and text_labels[0].get_theme_color("font_outline_color") == Color.BLACK, "Menu labels have black outlines")
-	check(text_labels[0].text == "1" and text_labels[0].get_theme_color("font_color") == PuzzleBoard.text_color(main.store.get_color(1)), "Card number has no padding and uses its level text color")
+	check(text_labels[0].text == "1" and text_labels[0].get_theme_color("font_color") == PuzzleBoard.menu_text_color(main.store.get_color(6)), "Card number uses the menu's selected hue")
 	check(text_labels[1].get_theme_font_size("font_size") == 18, "Completed checkmark is larger")
 	var card_outline: Panel = level_cards[0].get_children().filter(func(node): return node is Panel)[0]
 	var outline_style: StyleBoxFlat = card_outline.get_theme_stylebox("panel")
@@ -433,15 +554,63 @@ func run() -> void:
 	level_cards[0].mouse_entered.emit()
 	check(main.background_tween != null and main.background_tween.is_running(), "Menu hover starts a fade")
 	await create_timer(0.38).timeout
-	check(main.background_rect.color.is_equal_approx(PuzzleBoard.background_color(main.store.get_color(1))), "Menu background follows hovered level")
+	check(main.background_rect.color.is_equal_approx(PuzzleBoard.menu_background_color(main.store.get_color(1))), "Menu background follows hovered level's main hue")
+	check(main.palette_text.is_equal_approx(PuzzleBoard.menu_text_color(main.store.get_color(1))) and main.palette_button.is_equal_approx(PuzzleBoard.menu_button_color(main.store.get_color(1))), "Menu controls follow the hovered level's main hue")
 	level_cards[0].mouse_exited.emit()
 	await create_timer(0.38).timeout
-	check(main.background_rect.color.is_equal_approx(PuzzleBoard.background_color(main.store.get_color(1))) and main.menu_hovered_level == 1, "Menu retains the last hovered level palette")
+	check(main.background_rect.color.is_equal_approx(PuzzleBoard.menu_background_color(main.store.get_color(1))) and main.menu_hovered_level == 1, "Menu retains the last hovered level palette")
 	level_cards[5].mouse_entered.emit()
 	await create_timer(0.38).timeout
-	check(main.background_rect.color.is_equal_approx(PuzzleBoard.background_color(main.store.get_color(6))) and main.menu_hovered_level == 6, "Hovering another level replaces the held palette")
+	check(main.background_rect.color.is_equal_approx(PuzzleBoard.menu_background_color(main.store.get_color(6))) and main.menu_hovered_level == 6, "Hovering another level replaces the held palette")
 	level_cards[5].mouse_exited.emit()
 	check(main.menu_hovered_level == 6, "Leaving the next card also keeps its palette")
+	key(main, KEY_SHIFT, true, false, true)
+	key(main, KEY_Z, true, false, true)
+	key(main, KEY_U, true, false, true)
+	await process_frame
+	check(main.rearrange_mode and main.menu_cards[0].get("rearranging"), "Shift+Z+U enables draggable menu cards")
+	var first_slot: Vector2 = main.menu_cards[0].global_position
+	var third_slot: Vector2 = main.menu_cards[2].global_position
+	var drag_press := InputEventMouseButton.new()
+	drag_press.button_index = MOUSE_BUTTON_LEFT
+	drag_press.pressed = true
+	main.menu_cards[0].gui_input.emit(drag_press)
+	check(main.menu_drag_source == 1, "Pressing a rearrange card starts the menu drag")
+	main._start_menu_drag(1, first_slot + Vector2(32, 32))
+	main._update_menu_drag(third_slot + Vector2(8, 32))
+	check(main.menu_dragging and main.menu_drag_target == 3 and is_instance_valid(main.menu_drag_icon), "Dragging previews insertion between levels")
+	await create_timer(0.20).timeout
+	check(main.menu_cards[1].global_position.distance_to(first_slot) < 1.0, "Insert preview animates shifted cards into the gap")
+	main._cancel_menu_drag()
+	main.rearrange_action = "swap"
+	main._start_menu_drag(1, first_slot + Vector2(32, 32))
+	main._update_menu_drag(third_slot + Vector2(32, 32))
+	await create_timer(0.20).timeout
+	check(main.menu_drag_target == 3 and main.menu_cards[2].global_position.distance_to(first_slot) < 1.0, "Swap preview animates the target into the dragged slot")
+	var drag_release := InputEventMouseButton.new()
+	drag_release.button_index = MOUSE_BUTTON_LEFT
+	drag_release.position = Vector2(-100, -100)
+	main._input(drag_release)
+	check(main.menu_drag_source == 0 and not main.menu_dragging, "Releasing outside the selector cancels the drag")
+	main.rearrange_action = "insert"
+	key(main, KEY_U, false, false, true)
+	key(main, KEY_Z, false, false, true)
+	key(main, KEY_SHIFT, false)
+	key(main, KEY_SHIFT, true, false, true)
+	key(main, KEY_Z, true, false, true)
+	key(main, KEY_U, true, false, true)
+	check(not main.rearrange_mode and not main.menu_cards[0].get("rearranging"), "Shift+Z+U returns to level selection")
+	key(main, KEY_U, false, false, true)
+	key(main, KEY_Z, false, false, true)
+	key(main, KEY_SHIFT, false)
+	main._toggle_rearrange()
+	await process_frame
+	main._start_menu_drag(1, main.menu_cards[0].global_position + Vector2(32, 32))
+	main._update_menu_drag(main.menu_cards[2].global_position + Vector2(8, 32))
+	key(main, KEY_ESCAPE, true)
+	check(main.screen == "menu" and not main.rearrange_mode and main.menu_drag_source == 0 and not is_instance_valid(main.menu_drag_icon), "Escape closes rearrange mode and cancels its drag")
+	key(main, KEY_ESCAPE, false)
+	level_cards = main.menu_cards.duplicate()
 	level_cards[0].mouse_entered.emit()
 	key(main, KEY_SHIFT, true, false, true)
 	key(main, KEY_Z, true, false, true)
@@ -450,6 +619,39 @@ func run() -> void:
 	key(main, KEY_O, false, false, true)
 	key(main, KEY_Z, false, false, true)
 	key(main, KEY_SHIFT, false)
+	key(main, KEY_SHIFT, true, false, true)
+	key(main, KEY_Z, true, false, true)
+	key(main, KEY_RIGHT, true, false, true)
+	check(main.screen == "editor" and main.editor_level == 2 and main.editor_number_input.value == 2, "Shift+Z+Right loads the next editor level")
+	key(main, KEY_RIGHT, false, false, true)
+	key(main, KEY_Z, false, false, true)
+	key(main, KEY_SHIFT, false)
+	key(main, KEY_SHIFT, true, false, true)
+	key(main, KEY_Z, true, false, true)
+	key(main, KEY_LEFT, true, false, true)
+	check(main.editor_level == 1 and main.editor_number_input.value == 1, "Shift+Z+Left loads the previous editor level")
+	key(main, KEY_LEFT, false, false, true)
+	key(main, KEY_Z, false, false, true)
+	key(main, KEY_SHIFT, false)
+	main._toggle_editor_playtest()
+	check(main.editor_playtesting, "Editor playtest starts before Escape")
+	key(main, KEY_ESCAPE, true)
+	check(main.screen == "menu" and not main.rearrange_mode and not main.color_mode and not main.editor_playtesting, "Escape leaves the editor for a normal menu")
+	key(main, KEY_ESCAPE, false)
+	main._toggle_color_editor()
+	check(main.color_mode, "Menu color overlay opens")
+	key(main, KEY_ESCAPE, true)
+	check(main.screen == "menu" and not main.color_mode and not is_instance_valid(main.overlay), "Escape closes the color overlay")
+	key(main, KEY_ESCAPE, false)
+	main.menu_cards[0].mouse_entered.emit()
+	await create_timer(0.38).timeout
+	main.play_level(1)
+	check(main.background_tween != null and main.background_tween.is_running() and main.background_rect.color.is_equal_approx(PuzzleBoard.menu_background_color(main.store.get_color(1))), "Opening a level fades from its menu hue")
+	await create_timer(0.38).timeout
+	check(main.background_rect.color.is_equal_approx(PuzzleBoard.background_color(main.store.get_color(1))), "Opening a level reaches the play background hue")
+	key(main, KEY_ESCAPE, true)
+	check(main.screen == "menu" and not main.rearrange_mode and not main.color_mode, "Escape leaves play for the main menu")
+	key(main, KEY_ESCAPE, false)
 	var shifted_store := LevelStore.new()
 	shifted_store.mirror_project = false
 	shifted_store.levels.clear()
@@ -468,20 +670,37 @@ func run() -> void:
 	check(shifted_store.get_level(6).tiles == next_layout.tiles and shifted_store.get_level(9).tiles == later_layout.tiles and not shifted_store.levels.has("10"), "Deletion shifts later custom levels down")
 	check(shifted_store.completed.has("6") and not shifted_store.completed.has("7"), "Deletion shifts completion records back")
 	check(shifted_store.delete_level(5) == ERR_DOES_NOT_EXIST, "Generated levels cannot be deleted as custom levels")
+	var reorder_store := LevelStore.new()
+	reorder_store.mirror_project = false
+	reorder_store.levels.clear()
+	reorder_store.completed.clear()
+	check(reorder_store.save_level(2, first_layout) == OK and reorder_store.complete_first(3) == OK, "Rearrange fixtures save")
+	var original_one := reorder_store.get_level(1)
+	var original_three := reorder_store.get_level(3)
+	check(reorder_store.rearrange_level(1, 3, "insert", true) == OK, "Insert moves a dragged level after the target")
+	check(reorder_store.get_level(1).tiles == first_layout.tiles and reorder_store.get_level(2).tiles == original_three.tiles and reorder_store.get_level(3).tiles == original_one.tiles, "Insert shifts puzzles into their new slots")
+	check(reorder_store.rearrange_level(2, 4, "swap") == OK, "Swap exchanges the dragged and target levels")
+	check(reorder_store.get_level(4).tiles == original_three.tiles and not reorder_store.completed.has("2") and reorder_store.completed.has("4") and reorder_store.menu_unlocked() == 4, "Swap carries completion and preserves unlocked cards")
+	check(reorder_store.rearrange_level(4, 1, "insert", false) == OK and reorder_store.get_level(1).tiles == original_three.tiles, "Insert also moves a dragged level before the target")
+	check(reorder_store.rearrange_level(1, 1, "swap") == ERR_INVALID_PARAMETER, "Dropping a level on itself leaves the order alone")
+	var reorder_reload := LevelStore.new()
+	check(reorder_reload.get_level(1).tiles == original_three.tiles and reorder_reload.menu_unlocked() == 4, "Rearranged puzzles and unlock range survive reload")
 	main.show_menu()
 	key(main, KEY_CTRL, true, true)
 	key(main, KEY_Z, true, true)
 	key(main, KEY_M, true, true)
 	check(main.store.frontier() == 100 and main.store.completed.has("99"), "Ctrl+Z+M completes and unlocks the first 99 levels")
-	check(main.menu_cards.size() == 30 and main.menu_columns <= 15 and main.menu_rows.get_child_count() == ceili(30.0 / main.menu_columns) and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_CENTER, "Menu centers each row with up to 15 level cards")
+	check(main.menu_cards.size() == 30 and main.menu_columns <= 15 and main.menu_rows.get_child_count() == ceili(30.0 / main.menu_columns) and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_BEGIN, "Menu uses left-aligned rows of up to 15 level cards")
+	check((main.content.get_child(0) as HBoxContainer).get_child(2).text.begins_with("Play level 100"), "Unlock shortcut refreshes the menu's next-level button")
 	key(main, KEY_M, false, true)
 	key(main, KEY_Z, false, true)
 	key(main, KEY_CTRL, false)
+	main.play_level(20)
 	key(main, KEY_CTRL, true, true)
 	key(main, KEY_Z, true, true)
 	key(main, KEY_N, true, true)
 	check(main.store.frontier() == 2 and main.store.completed.size() == 1 and main.store.completed.has("1"), "Ctrl+Z+N clears completion except level 1")
-	check(main.menu_cards.size() == 2, "Reset progress removes locked levels from the menu")
+	check(main.screen == "menu" and main.menu_cards.size() == 2 and (main.content.get_child(0) as HBoxContainer).get_child(2).text.begins_with("Play level 2"), "Reset shortcut opens and refreshes the menu")
 	key(main, KEY_N, false, true)
 	key(main, KEY_Z, false, true)
 	key(main, KEY_CTRL, false)

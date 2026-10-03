@@ -4,12 +4,14 @@ extends RefCounted
 const LEVELS_PATH := "user://levels.json"
 const SOURCE_PATH := "res://data/levels.json"
 const PROGRESS_PATH := "user://progress.json"
+const DEFAULT_LINE_COLOR := Color("eae345")
 const PREVIOUS_USER_FOLDERS := ["Godot/app_userdata/Unium", "Godot/app_userdata/Afterglow", "Godot/app_userdata/Glimmer", "Godot/app_userdata/Strike-through"]
 
 var levels: Dictionary = {}
 var colors: Dictionary = {}
 var line_colors: Dictionary = {}
 var completed: Dictionary = {}
+var unlocked_through := 0
 var cache: Dictionary = {}
 var persistence_error := ""
 var mirror_project := true
@@ -29,6 +31,8 @@ func _init() -> void:
 		for key in progress.completed:
 			if str(key).is_valid_int() and int(key) > 0 and progress.completed[key] == true:
 				completed[str(key)] = true
+	if progress.get("unlocked_through") is int or progress.get("unlocked_through") is float:
+		unlocked_through = maxi(0, int(progress.unlocked_through))
 
 static func _previous_path(folder: String, filename: String) -> String:
 	return OS.get_data_dir().path_join(folder).path_join(filename)
@@ -97,17 +101,20 @@ func get_color(number: int) -> Color:
 	var group := str(group_start(number))
 	return Color(colors[group]) if colors.has(group) else Puzzle.palette(number)
 
-func get_line_color(number: int, tile_color: Color = Color.TRANSPARENT) -> Color:
+func get_line_color(number: int, _tile_color: Color = Color.TRANSPARENT) -> Color:
 	var group := str(group_start(number))
 	if line_colors.has(group):
 		return Color(line_colors[group])
-	return PuzzleBoard.line_color(tile_color if tile_color.a > 0.0 else get_color(number))
+	return DEFAULT_LINE_COLOR
 
 func frontier() -> int:
 	var number := 1
 	while completed.get(str(number), false):
 		number += 1
 	return number
+
+func menu_unlocked() -> int:
+	return maxi(frontier(), unlocked_through)
 
 func mark_complete(number: int) -> Error:
 	completed[str(number)] = true
@@ -120,10 +127,11 @@ func complete_first(number: int) -> Error:
 
 func reset_completion_to_first() -> Error:
 	completed = {"1": true}
+	unlocked_through = 0
 	return save_progress()
 
 func save_progress() -> Error:
-	return _atomic_write(PROGRESS_PATH, {"completed": completed})
+	return _atomic_write(PROGRESS_PATH, {"completed": completed, "unlocked_through": unlocked_through})
 
 func save_level(number: int, value: Dictionary) -> Error:
 	if number < 1 or not valid_level(value):
@@ -170,13 +178,61 @@ func delete_level(number: int) -> Error:
 	completed = shifted_completed
 	return _save_shifted_levels(previous_levels, previous_completed)
 
-func _save_shifted_levels(previous_levels: Dictionary, previous_completed: Dictionary) -> Error:
+func rearrange_level(source: int, target: int, action: String, after: bool = false) -> Error:
+	var unlocked := menu_unlocked()
+	if source < 1 or target < 1 or source > unlocked or target > unlocked or source == target:
+		return ERR_INVALID_PARAMETER
+	if action != "insert" and action != "swap":
+		return ERR_INVALID_PARAMETER
+	var previous_levels := levels
+	var previous_completed := completed
+	var previous_unlocked := unlocked_through
+	var first := mini(source, target)
+	var last := maxi(source, target)
+	var layouts: Array[Dictionary] = []
+	var progress: Array[bool] = []
+	for number in range(first, last + 1):
+		layouts.append(get_level(number))
+		progress.append(completed.get(str(number), false))
+	if action == "swap":
+		var left := source - first
+		var right := target - first
+		var held_layout := layouts[left]
+		layouts[left] = layouts[right]
+		layouts[right] = held_layout
+		var held_progress := progress[left]
+		progress[left] = progress[right]
+		progress[right] = held_progress
+	else:
+		var removed_layout: Dictionary = layouts.pop_at(source - first)
+		var removed_progress: bool = progress.pop_at(source - first)
+		var insertion := target - first + (1 if after else 0)
+		if source < target or (source == target and after):
+			insertion -= 1
+		layouts.insert(insertion, removed_layout)
+		progress.insert(insertion, removed_progress)
+	levels = levels.duplicate(true)
+	completed = completed.duplicate(true)
+	for offset in range(layouts.size()):
+		var number := first + offset
+		var layout := layouts[offset]
+		levels[str(number)] = {"width": layout.width, "height": layout.height, "tiles": layout.tiles.duplicate()}
+		if progress[offset]:
+			completed[str(number)] = true
+		else:
+			completed.erase(str(number))
+	unlocked_through = unlocked
+	return _save_shifted_levels(previous_levels, previous_completed, previous_unlocked)
+
+func _save_shifted_levels(previous_levels: Dictionary, previous_completed: Dictionary, previous_unlocked: int = -1) -> Error:
 	var result := save_levels()
 	if result == OK:
 		result = save_progress()
 	if result != OK:
 		levels = previous_levels
 		completed = previous_completed
+		if previous_unlocked >= 0:
+			unlocked_through = previous_unlocked
 		save_levels()
 		save_progress()
 	return result

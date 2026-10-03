@@ -254,6 +254,12 @@ static func button_color(color: Color) -> Color:
 static func text_color(color: Color) -> Color:
 	return balanced_color(fposmod(color.h + SPLIT_UI_OFFSET, 1.0), 0.14, 0.84)
 
+static func menu_button_color(color: Color) -> Color:
+	return balanced_color(color.h, 0.35, 0.055)
+
+static func menu_text_color(color: Color) -> Color:
+	return balanced_color(color.h, 0.14, 0.84)
+
 static func tile_color(value: int, color: Color) -> Color:
 	if value == 2:
 		return Color.from_hsv(0.57, 0.07, 0.45)
@@ -261,6 +267,9 @@ static func tile_color(value: int, color: Color) -> Color:
 
 static func background_color(color: Color) -> Color:
 	return balanced_color(fposmod(color.h + SPLIT_UI_OFFSET, 1.0), 0.25, 0.022)
+
+static func menu_background_color(color: Color) -> Color:
+	return balanced_color(color.h, 0.25, 0.022)
 
 static func luminance(color: Color) -> float:
 	var linear := color.srgb_to_linear()
