@@ -1,22 +1,28 @@
 extends SceneTree
 
+var main: Variant
+
 func _init() -> void:
 	call_deferred("run")
 
 func capture(filename: String) -> void:
+	var deadline := Time.get_ticks_msec() + 30000
+	while main.get("screen") == "menu" and (not main.get("menu_thumbnail_queue").is_empty() or main.get("menu_thumbnail_task") >= 0) and Time.get_ticks_msec() < deadline:
+		await process_frame
 	await process_frame
 	await process_frame
 	await RenderingServer.frame_post_draw
 	root.get_texture().get_image().save_png("res://.test-user/" + filename + ".png")
 
 func run() -> void:
-	var main = load("res://main.tscn").instantiate()
+	main = load("res://main.tscn").instantiate()
 	root.add_child(main)
 	main.store.mirror_project = false
 	main.store.levels.clear()
 	main.store.colors.clear()
 	main.store.line_colors.clear()
 	main.store.completed.clear()
+	main.store.unlocked_through = 0
 	main.show_menu()
 	await capture("first-menu")
 	for number in range(1, 100):
@@ -34,6 +40,7 @@ func run() -> void:
 	main.show_menu()
 	await capture("menu")
 	var first_card: Button = main.menu_cards[0]
+	Input.warp_mouse(first_card.global_position + Vector2(32, 32))
 	first_card.mouse_entered.emit()
 	await create_timer(0.35).timeout
 	await capture("menu-hover")
@@ -71,4 +78,8 @@ func run() -> void:
 	main._complete_level()
 	await create_timer(0.4).timeout
 	await capture("celebration")
+	main.store.completed["1"] = true
+	main.play_level(1)
+	await create_timer(0.35).timeout
+	await capture("completed-play")
 	quit()

@@ -146,6 +146,7 @@ func run() -> void:
 	await process_frame
 	main.store.mirror_project = false
 	main.store.completed.clear()
+	main.store.unlocked_through = 0
 	main.store.levels.clear()
 	main.store.colors.clear()
 	main.store.line_colors.clear()
@@ -162,10 +163,10 @@ func run() -> void:
 		check(PuzzleBoard.luminance(PuzzleBoard.line_color(sample)) > PuzzleBoard.luminance(PuzzleBoard.tile_color(0, sample)), "Line is brighter than the light tiles across hues")
 		for kind in ["Button", "PrimaryButton"]:
 			for state in ["normal", "hover", "pressed"]:
-				var fill: Color = main.theme.get_stylebox(state, kind).bg_color
+				var fill: Color = main.palette_theme.get_stylebox(state, kind).bg_color
 				check((PuzzleBoard.luminance(ink) + 0.05) / (PuzzleBoard.luminance(fill) + 0.05) >= 4.5, "Button text stays readable across hues and interaction states")
-		var primary_fill: Color = main.theme.get_stylebox("normal", "PrimaryButton").bg_color
-		var secondary_fill: Color = main.theme.get_stylebox("normal", "Button").bg_color
+		var primary_fill: Color = main.palette_theme.get_stylebox("normal", "PrimaryButton").bg_color
+		var secondary_fill: Color = main.palette_theme.get_stylebox("normal", "Button").bg_color
 		check(PuzzleBoard.luminance(primary_fill) > PuzzleBoard.luminance(secondary_fill) * 1.5, "Primary buttons stand out from secondary buttons")
 	main.screen = "menu"
 	for degrees in range(0, 360, 15):
@@ -175,29 +176,45 @@ func run() -> void:
 		check(is_equal_approx(main.palette_text.h, sample.h) and is_equal_approx(main.palette_button.h, sample.h), "Menu text and buttons follow the selected level's main hue")
 		for kind in ["Button", "PrimaryButton"]:
 			for state in ["normal", "hover", "pressed"]:
-				var fill: Color = main.theme.get_stylebox(state, kind).bg_color
+				var fill: Color = main.palette_theme.get_stylebox(state, kind).bg_color
 				check((PuzzleBoard.luminance(menu_ink) + 0.05) / (PuzzleBoard.luminance(fill) + 0.05) >= 4.5, "Menu buttons remain readable across hues")
 	main._apply_ui_palette(main.store.get_color(1))
 	main.play_level(1)
 	await create_timer(0.35).timeout
+	while is_instance_valid(main.screen_transition):
+		await process_frame
 	check(main.board != null, "Gameplay scene loaded")
+	check(main.completed_badge == null, "Unfinished puzzles have no completion badge")
 	var phrases_seen := {}
 	for phrase in CelebrationLines.LINES:
 		phrases_seen[phrase] = true
 	check(CelebrationLines.LINES.size() == 100 and phrases_seen.size() == 100, "Exactly 100 distinct celebration messages")
-	check(main.find_children("", "Label", true, false).all(func(node): return node.text != "H e a r t h l i n e"), "Game title is hidden inside levels")
+	check(main.find_children("", "Label", true, false).all(func(node): return node.text != "H e a r t h l i n e" or not node.is_visible_in_tree()), "Game title is hidden inside levels")
 	check(main.content.get_child(0).text == "Level 1", "Level numbers have no leading zero")
-	check(main.theme.get_color("font_color", "Label").is_equal_approx(PuzzleBoard.text_color(main.store.get_color(1))), "Play text uses the first split-complementary hue")
-	check((main.theme.get_stylebox("normal", "Button") as StyleBoxFlat).bg_color.is_equal_approx(PuzzleBoard.button_color(main.store.get_color(1))), "Secondary buttons use the subdued split-complementary hue")
-	check(main.theme.get_color("font_shadow_color", "Label").a > 0.0, "Text has a shadow")
+	check(main.palette_theme.get_color("font_color", "Label").is_equal_approx(PuzzleBoard.text_color(main.store.get_color(1))), "Play text uses the first split-complementary hue")
+	check((main.palette_theme.get_stylebox("normal", "Button") as StyleBoxFlat).bg_color.is_equal_approx(PuzzleBoard.button_color(main.store.get_color(1))), "Secondary buttons use the subdued split-complementary hue")
+	check(main.palette_theme.get_color("font_shadow_color", "Label").a > 0.0, "Text has a shadow")
 	check(ProjectSettings.get_setting("display/window/stretch/mode") == "canvas_items" and ProjectSettings.get_setting("display/window/stretch/aspect") == "expand", "Game layout stretches to fill fullscreen")
-	check(main.content.get_child(2) is HBoxContainer and (main.content.get_child(2) as HBoxContainer).get_child_count() == 2, "Reset line is inline with All puzzles")
+	var play_controls := main.content.get_child(2) as HBoxContainer
+	check(play_controls.get_child_count() == 5 and (play_controls.get_child(0) as Button).text == "▦ All puzzles" and play_controls.get_child(1).size_flags_horizontal == Control.SIZE_EXPAND_FILL and (play_controls.get_child(2) as Button).text == "← Previous puzzle" and (play_controls.get_child(3) as Button).text == "↻ Reset line" and (play_controls.get_child(4) as Button).text == "Next puzzle →", "Grid button returns to puzzles and navigation buttons align at the right")
 	check(main.background_rect.color == PuzzleBoard.background_color(main.store.get_color(1)), "Entire play screen uses the level background")
 	check((main.board_panel.get_theme_stylebox("panel") as StyleBoxFlat).bg_color == main.background_rect.color, "Play area shares the same background")
 	var b: PuzzleBoard = main.board
+	var left_dark := -1
+	for cell in range(b.tiles.size()):
+		if b.tiles[cell] != 1:
+			continue
+		var x := cell % b.width
+		if left_dark < 0 or x < left_dark % b.width:
+			left_dark = cell
+	check(b.start_label.visible and not b.finish_label.visible and b.start_label.text == "Drag" and b.finish_label.text.is_empty(), "Level 1 shows Drag and leaves the finish tile blank")
+	check((b.start_label.position + b.start_label.size * 0.5).is_equal_approx(b.center(left_dark)), "Drag sits on the leftmost dark tile")
+	check(b.start_label.get_theme_color("font_color") == Color.WHITE and b.start_label.get_theme_color("font_outline_color") == Color.BLACK, "Drag has white text and a black outline")
 	check(b.line.default_color == LevelStore.DEFAULT_LINE_COLOR and b.start_dot.color == b.line.default_color and b.line_group.modulate.a == 1.0, "Line and start marker use the saved area-six fallback color")
 	check(b.line_shadow.default_color.a > 0.0 and b.line_shadow.position.y > 0.0, "Line has a raised shadow")
 	b.configure({"width": 5, "height": 5, "tiles": all_light}, Color.WHITE)
+	check(b.tile_rects.size() == 25 and b.tile_styles.size() == 3, "Board caches tile geometry and shares three base styles")
+	check(not b.start_label.visible and not b.finish_label.visible, "Tutorial labels hide when the board has no dark tiles")
 	b._begin(b.center(5))
 	check(b.path == [5], "Mouse down starts a single-tile line")
 	b._end()
@@ -468,7 +485,7 @@ func run() -> void:
 	legacy_store.colors.clear()
 	legacy_store._load_levels(legacy_color_path)
 	check(is_equal_approx(legacy_store.get_color(1).h, custom_hue.h) and is_equal_approx(legacy_store.get_color(5).h, custom_hue.h), "Old per-level color applies to its group")
-	check(reloaded.frontier() == 2, "Only next unsolved level unlocks")
+	check(reloaded.frontier() == 2 and reloaded.menu_unlocked() == 5 and reloaded.menu_levels() == [1, 2, 3, 4, 5], "The first five levels are available before three completions")
 	main.play_level(2)
 	await process_frame
 	check(main.board.line.default_color.is_equal_approx(custom_line), "Saved line color appears in gameplay")
@@ -477,6 +494,7 @@ func run() -> void:
 	main.board._trace(main.board.center(1))
 	check(main.board.locked, "Solving locks input during celebration")
 	check(main.store.completed.get("2", false), "Solving marks completed")
+	check(is_instance_valid(main.completed_badge) and main.completed_badge.is_visible_in_tree() and main.completed_badge.size == Vector2(72, 72) and main.completed_badge.position.x > main.size.x - 120, "Solving shows a large completion badge at the top right")
 	var celebration_text: Array = main.find_children("", "Label", true, false).map(func(node): return node.text)
 	check("Level 2 complete!" in celebration_text and celebration_text.any(func(line): return line.ends_with("!") and (line.trim_suffix("!") + ".") in CelebrationLines.LINES), "Celebration chooses a short exclamation")
 	var praise_labels: Array = main.find_children("", "Label", true, false).filter(func(node): return node.text.ends_with("!") and (node.text.trim_suffix("!") + ".") in CelebrationLines.LINES)
@@ -484,8 +502,10 @@ func run() -> void:
 	check(not "Take a breath. Your next puzzle is on its way." in celebration_text, "Celebration has no bottom sentence")
 	await create_timer(2.7).timeout
 	check(main.current_level == 3, "Celebration automatically advances")
+	check(main.completed_badge == null, "An unfinished next puzzle has no completion badge")
 	main.play_level(2)
 	await process_frame
+	check(is_instance_valid(main.completed_badge) and main.completed_badge.is_visible_in_tree(), "Reopening a completed puzzle restores its badge")
 	main.board._begin(main.board.center(0))
 	main.board._trace(main.board.center(1))
 	key(main, KEY_SHIFT, true, false, true)
@@ -502,16 +522,16 @@ func run() -> void:
 	main.play_level(5)
 	main.play_level(6)
 	check(main.background_tween != null and main.background_tween.is_running(), "Changing five-level sets starts a fade")
-	check(main.palette_tween != null and main.palette_tween.is_running(), "Text and button colors fade with the level set")
+	check(main.transition_old_shell.theme != main.active_shell.theme, "Moving screens keep independent palettes")
 	check(main.background_rect.color == PuzzleBoard.background_color(main.store.get_color(5)), "Set transition begins with previous background")
-	check(main.theme.get_color("font_color", "Label") == PuzzleBoard.text_color(main.store.get_color(5)), "Palette transition begins with previous text color")
-	await create_timer(0.30).timeout
-	check(not main.theme.get_color("font_color", "Label").is_equal_approx(PuzzleBoard.text_color(main.store.get_color(5))) and not main.theme.get_color("font_color", "Label").is_equal_approx(PuzzleBoard.text_color(main.store.get_color(6))), "Text color interpolates during the fade")
+	check(main.transition_old_shell.theme.get_color("font_color", "Label") == PuzzleBoard.text_color(main.store.get_color(5)), "Outgoing screen keeps its previous text color")
+	await create_timer(0.08).timeout
+	check(main.palette_theme.get_color("font_color", "Label").is_equal_approx(PuzzleBoard.text_color(main.store.get_color(6))) and main.transition_old_shell.theme.get_color("font_color", "Label").is_equal_approx(PuzzleBoard.text_color(main.store.get_color(5))), "Screen motion preserves both palettes without per-frame theme changes")
 	await create_timer(0.38).timeout
 	check(main.background_rect.color.is_equal_approx(PuzzleBoard.background_color(main.store.get_color(6))), "Set transition reaches the new background")
 	check((main.board_panel.get_theme_stylebox("panel") as StyleBoxFlat).bg_color.is_equal_approx(main.background_rect.color), "Board and whole screen fade together")
-	check(main.theme.get_color("font_color", "Label").is_equal_approx(PuzzleBoard.text_color(main.store.get_color(6))), "Text reaches the next adjacent color")
-	check((main.theme.get_stylebox("normal", "Button") as StyleBoxFlat).bg_color.is_equal_approx(PuzzleBoard.button_color(main.store.get_color(6))), "Buttons reach the next adjacent color")
+	check(main.palette_theme.get_color("font_color", "Label").is_equal_approx(PuzzleBoard.text_color(main.store.get_color(6))), "Text reaches the next adjacent color")
+	check((main.palette_theme.get_stylebox("normal", "Button") as StyleBoxFlat).bg_color.is_equal_approx(PuzzleBoard.button_color(main.store.get_color(6))), "Buttons reach the next adjacent color")
 	key(main, KEY_SHIFT, true, false, true)
 	key(main, KEY_Z, true, false, true)
 	key(main, KEY_RIGHT, true, false, true)
@@ -536,28 +556,53 @@ func run() -> void:
 	check(main.background_rect.color == PuzzleBoard.menu_background_color(main.store.get_color(6)), "Menu defaults to the current unsolved level's main hue")
 	check(main.palette_text.is_equal_approx(PuzzleBoard.menu_text_color(main.store.get_color(6))) and main.palette_button.is_equal_approx(PuzzleBoard.menu_button_color(main.store.get_color(6))), "Menu text and buttons use the selected level's main hue")
 	var level_cards: Array[Button] = main.menu_cards.duplicate()
+	check(level_cards.size() == 10 and (main.menu_hint.get_child(0) as Label).text == "?" and main.menu_rows.get_child(0).get_child(10) == main.menu_hint, "The next locked group is hinted after the unlocked cards")
+	var hint_style := main.menu_hint.get_theme_stylebox("panel") as StyleBoxFlat
+	check(hint_style.border_width_left == 2 and hint_style.border_color == main.LOCKED_HINT_OUTLINE and main.menu_hint.mouse_filter == Control.MOUSE_FILTER_STOP, "Locked group hint has a red outline and accepts clicks")
+	main.menu_hint.mouse_entered.emit()
+	await create_timer(0.08).timeout
+	check(main.menu_hint.scale.x > 1.02, "Locked group hint grows on hover")
+	main.menu_hint.mouse_exited.emit()
+	await create_timer(0.18).timeout
+	check(main.menu_hint.scale.is_equal_approx(Vector2.ONE), "Locked group hint shrinks after hover")
+	var hint_click := InputEventMouseButton.new()
+	hint_click.button_index = MOUSE_BUTTON_LEFT
+	hint_click.pressed = true
+	main.menu_hint.gui_input.emit(hint_click)
+	await create_timer(0.06).timeout
+	check(main.screen == "menu" and main.position.length() > 0.0, "Clicking the locked group hint shakes the menu without opening a puzzle")
+	var first_shake_offsets: Array = main.screen_shake_offsets.duplicate()
+	check(first_shake_offsets.size() >= 8 and first_shake_offsets.all(func(offset): return offset.length() > 0.0), "Screen shake uses several nonzero movements")
+	await create_timer(0.25).timeout
+	check(main.position == Vector2.ZERO, "The screen shake returns the menu to its original position")
+	main.menu_hint.gui_input.emit(hint_click)
+	check(main.screen_shake_offsets != first_shake_offsets, "Each locked card click gets a new shake pattern")
+	await create_timer(0.32).timeout
+	check(main.position == Vector2.ZERO, "A second screen shake also returns to its original position")
 	check(not level_cards.is_empty() and level_cards[0].size == Vector2(64, 64), "Menu level cards are 64 by 64")
 	check(level_cards.all(func(node): return node.tooltip_text.is_empty()), "Level cards do not show hover popups")
 	check(main.menu_rows.get_child_count() == 1 and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_BEGIN, "Menu rows align their cards from the left")
-	check(main.content.get_child(0) is HBoxContainer and (main.content.get_child(0) as HBoxContainer).get_children().any(func(node): return node is Button and node.text == "Play level 6   →"), "Play button sits beside the title")
+	check(main.content.get_child(0) is HBoxContainer and (main.content.get_child(0) as HBoxContainer).get_children().any(func(node): return node is Button and node.text == "Play"), "Play button sits beside the title")
 	check((main.content.get_child(0) as HBoxContainer).get_child(0).text == "H e a r t h l i n e", "Cozy menu title has spaced letters")
-	check(main.content.get_child(0).get_child(2).theme_type_variation == "PrimaryButton", "Play level uses the prominent button style")
+	check(main.content.get_child(0).get_child(2).theme_type_variation == "PrimaryButton", "Play uses the prominent button style")
 	var thumbnail: TextureRect = level_cards[0].get_children().filter(func(node): return node is TextureRect)[0]
 	check(thumbnail.position == Vector2.ZERO and thumbnail.size == Vector2(64, 64), "Screenshot fills the whole menu button")
-	var text_labels: Array = level_cards[0].get_children().filter(func(node): return node is Label)
-	check(text_labels[0].get_theme_constant("outline_size") == 3 and text_labels[0].get_theme_color("font_outline_color") == Color.BLACK, "Menu labels have black outlines")
-	check(text_labels[0].text == "1" and text_labels[0].get_theme_color("font_color") == PuzzleBoard.menu_text_color(main.store.get_color(6)), "Card number uses the menu's selected hue")
-	check(text_labels[1].get_theme_font_size("font_size") == 18, "Completed checkmark is larger")
+	check(level_cards.all(func(card): return card.get_children().all(func(node): return not node is Label)), "Menu cards have no numbers or checkmarks")
+	check(thumbnail.modulate == Color.WHITE and not level_cards[0].has_theme_stylebox_override("normal"), "Completed cards keep their original puzzle preview colors")
 	var card_outline: Panel = level_cards[0].get_children().filter(func(node): return node is Panel)[0]
 	var outline_style: StyleBoxFlat = card_outline.get_theme_stylebox("panel")
-	check(outline_style.border_width_left == 2 and outline_style.corner_radius_top_left > 0 and outline_style.border_color == PuzzleBoard.tile_color(0, main.store.get_color(1)), "Cards have a rounded light-tile outline")
+	check(outline_style.border_width_left == 2 and outline_style.corner_radius_top_left > 0 and outline_style.border_color == main.COMPLETED_CARD_OUTLINE, "Completed cards have a rounded green outline")
+	var unfinished_outline: Panel = level_cards[5].get_children().filter(func(node): return node is Panel)[0]
+	check((unfinished_outline.get_theme_stylebox("panel") as StyleBoxFlat).border_color == Color("eae345"), "Uncompleted level cards have yellow outlines")
 	level_cards[0].mouse_entered.emit()
 	check(main.background_tween != null and main.background_tween.is_running(), "Menu hover starts a fade")
+	check(level_cards[0].has_meta("hover_tween") and (level_cards[0].get_meta("hover_tween") as Tween).is_running(), "Menu hover starts the card growth animation")
 	await create_timer(0.38).timeout
 	check(main.background_rect.color.is_equal_approx(PuzzleBoard.menu_background_color(main.store.get_color(1))), "Menu background follows hovered level's main hue")
 	check(main.palette_text.is_equal_approx(PuzzleBoard.menu_text_color(main.store.get_color(1))) and main.palette_button.is_equal_approx(PuzzleBoard.menu_button_color(main.store.get_color(1))), "Menu controls follow the hovered level's main hue")
 	level_cards[0].mouse_exited.emit()
 	await create_timer(0.38).timeout
+	check(level_cards[0].scale.is_equal_approx(Vector2.ONE), "A level card shrinks after hover")
 	check(main.background_rect.color.is_equal_approx(PuzzleBoard.menu_background_color(main.store.get_color(1))) and main.menu_hovered_level == 1, "Menu retains the last hovered level palette")
 	level_cards[5].mouse_entered.emit()
 	await create_timer(0.38).timeout
@@ -674,38 +719,93 @@ func run() -> void:
 	reorder_store.mirror_project = false
 	reorder_store.levels.clear()
 	reorder_store.completed.clear()
+	reorder_store.unlocked_through = 0
 	check(reorder_store.save_level(2, first_layout) == OK and reorder_store.complete_first(3) == OK, "Rearrange fixtures save")
 	var original_one := reorder_store.get_level(1)
 	var original_three := reorder_store.get_level(3)
 	check(reorder_store.rearrange_level(1, 3, "insert", true) == OK, "Insert moves a dragged level after the target")
 	check(reorder_store.get_level(1).tiles == first_layout.tiles and reorder_store.get_level(2).tiles == original_three.tiles and reorder_store.get_level(3).tiles == original_one.tiles, "Insert shifts puzzles into their new slots")
 	check(reorder_store.rearrange_level(2, 4, "swap") == OK, "Swap exchanges the dragged and target levels")
-	check(reorder_store.get_level(4).tiles == original_three.tiles and not reorder_store.completed.has("2") and reorder_store.completed.has("4") and reorder_store.menu_unlocked() == 4, "Swap carries completion and preserves unlocked cards")
+	check(reorder_store.get_level(4).tiles == original_three.tiles and not reorder_store.completed.has("2") and reorder_store.completed.has("4") and reorder_store.menu_unlocked() == 10, "Swap carries completion and preserves unlocked groups")
 	check(reorder_store.rearrange_level(4, 1, "insert", false) == OK and reorder_store.get_level(1).tiles == original_three.tiles, "Insert also moves a dragged level before the target")
 	check(reorder_store.rearrange_level(1, 1, "swap") == ERR_INVALID_PARAMETER, "Dropping a level on itself leaves the order alone")
 	var reorder_reload := LevelStore.new()
-	check(reorder_reload.get_level(1).tiles == original_three.tiles and reorder_reload.menu_unlocked() == 4, "Rearranged puzzles and unlock range survive reload")
+	check(reorder_reload.get_level(1).tiles == original_three.tiles and reorder_reload.menu_unlocked() == 10, "Rearranged puzzles and unlock range survive reload")
+	var unlock_store := LevelStore.new()
+	unlock_store.completed.clear()
+	unlock_store.unlocked_through = 0
+	check(unlock_store.menu_unlocked() == 5 and unlock_store.menu_levels() == [1, 2, 3, 4, 5], "Five levels are available at the start")
+	unlock_store.completed = {"1": true, "3": true}
+	check(unlock_store.menu_unlocked() == 5, "Two completions keep the next group locked")
+	unlock_store.completed["5"] = true
+	check(unlock_store.menu_unlocked() == 10 and unlock_store.menu_levels() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "Any three completions unlock the next group of five")
+	unlock_store.completed["6"] = true
+	unlock_store.completed["8"] = true
+	check(unlock_store.menu_unlocked() == 10, "The next group still needs three completions")
+	unlock_store.completed["10"] = true
+	check(unlock_store.menu_unlocked() == 15, "Three completions in the second group unlock another five")
+	check(unlock_store.adjacent_uncompleted(15, 1) == 2 and unlock_store.adjacent_uncompleted(2, -1) == 15 and unlock_store.adjacent_uncompleted(5, 1) == 7, "Puzzle navigation skips completed levels and wraps within unlocked groups")
+	check(unlock_store.adjacent_level(15, 1) == 1 and unlock_store.adjacent_level(1, -1) == 15 and unlock_store.adjacent_level(5, 1) == 6, "Adjacent navigation includes completed levels and wraps within unlocked groups")
+	unlock_store.unlocked_through = 15
+	unlock_store.completed = {"1": true}
+	check(unlock_store.menu_unlocked() == 15, "A group stays available after its completion records move")
 	main.show_menu()
-	key(main, KEY_CTRL, true, true)
-	key(main, KEY_Z, true, true)
-	key(main, KEY_M, true, true)
-	check(main.store.frontier() == 100 and main.store.completed.has("99"), "Ctrl+Z+M completes and unlocks the first 99 levels")
-	check(main.menu_cards.size() == 30 and main.menu_columns <= 15 and main.menu_rows.get_child_count() == ceili(30.0 / main.menu_columns) and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_BEGIN, "Menu uses left-aligned rows of up to 15 level cards")
-	check((main.content.get_child(0) as HBoxContainer).get_child(2).text.begins_with("Play level 100"), "Unlock shortcut refreshes the menu's next-level button")
-	key(main, KEY_M, false, true)
-	key(main, KEY_Z, false, true)
-	key(main, KEY_CTRL, false)
+	key(main, KEY_SHIFT, true, false, true)
+	key(main, KEY_Z, true, false, true)
+	key(main, KEY_M, true, false, true)
+	check(main.store.frontier() == 100 and main.store.completed.has("99"), "Shift+Z+M completes and unlocks the first 99 levels")
+	var menu_scroll := main.content.get_child(main.content.get_child_count() - 1) as ScrollContainer
+	check(main.menu_cards.size() == 105 and main.menu_columns <= 15 and main.menu_rows.get_child_count() == ceili(106.0 / main.menu_columns) and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_BEGIN and menu_scroll.vertical_scroll_mode == ScrollContainer.SCROLL_MODE_SHOW_ALWAYS, "Menu shows every unlocked group in one scrollable grid")
+	check((main.content.get_child(0) as HBoxContainer).get_child(2).text == "Play", "Unlock shortcut keeps the menu play button label short")
+	key(main, KEY_M, false, false, true)
+	key(main, KEY_Z, false, false, true)
+	key(main, KEY_SHIFT, false)
+	key(main, KEY_SHIFT, true, false, true)
+	key(main, KEY_Z, true, false, true)
+	key(main, KEY_B, true, false, true)
+	main.menu_cards[11].pressed.emit()
+	check(main.screen == "menu" and main.store.completed.size() == 12 and main.store.frontier() == 13 and main.menu_cards.size() == 15, "Shift+Z+B click completes through the selected level and stays in the menu")
+	check(not main.store.completed.has("99") and main.store.unlocked_through == 15, "Shift+Z+B click clears later completion and recalculates unlocked groups")
+	main.menu_cards[4].pressed.emit()
+	check(main.store.completed.size() == 5 and main.store.frontier() == 6 and main.menu_cards.size() == 10, "A second Shift+Z+B click replaces the completion cutoff")
+	var click_reload := LevelStore.new()
+	check(click_reload.completed.size() == 5 and click_reload.frontier() == 6 and click_reload.menu_unlocked() == 10, "Clicked completion cutoff survives reload")
+	key(main, KEY_B, false, false, true)
+	key(main, KEY_Z, false, false, true)
+	key(main, KEY_SHIFT, false)
 	main.play_level(20)
-	key(main, KEY_CTRL, true, true)
-	key(main, KEY_Z, true, true)
-	key(main, KEY_N, true, true)
-	check(main.store.frontier() == 2 and main.store.completed.size() == 1 and main.store.completed.has("1"), "Ctrl+Z+N clears completion except level 1")
-	check(main.screen == "menu" and main.menu_cards.size() == 2 and (main.content.get_child(0) as HBoxContainer).get_child(2).text.begins_with("Play level 2"), "Reset shortcut opens and refreshes the menu")
-	key(main, KEY_N, false, true)
-	key(main, KEY_Z, false, true)
-	key(main, KEY_CTRL, false)
+	key(main, KEY_SHIFT, true, false, true)
+	key(main, KEY_Z, true, false, true)
+	key(main, KEY_N, true, false, true)
+	check(main.store.frontier() == 2 and main.store.completed.size() == 1 and main.store.completed.has("1"), "Shift+Z+N clears completion except level 1")
+	check(main.screen == "menu" and main.menu_cards.size() == 5 and (main.content.get_child(0) as HBoxContainer).get_child(2).text == "Play", "Reset shortcut restores the first unlocked group")
+	key(main, KEY_N, false, false, true)
+	key(main, KEY_Z, false, false, true)
+	key(main, KEY_SHIFT, false)
 	var progress_reload := LevelStore.new()
 	check(progress_reload.frontier() == 2, "Reset completion survives reload")
+	main.store.completed = {"1": true, "3": true, "4": true, "7": true}
+	main.show_menu()
+	var shown_numbers: Array = main.menu_cards.map(func(card): return int(card.get("level_number")))
+	check(shown_numbers == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "Menu includes every level in unlocked groups across completion gaps")
+	check((main.content.get_child(0) as HBoxContainer).get_child(2).text == "Play", "Play button keeps its short label after a menu rebuild")
+	main._toggle_rearrange()
+	await process_frame
+	main._start_menu_drag(4, main.menu_cards[3].global_position + Vector2(32, 32))
+	main._update_menu_drag(main.menu_cards[6].global_position + Vector2(32, 32))
+	check(main.menu_drag_source == 4 and main.menu_drag_target == 7, "Rearrange preview reaches later levels in an unlocked group")
+	main._cancel_menu_drag()
+	check(main.store.rearrange_level(7, 2, "swap") == OK, "Unfinished and completed levels can be rearranged")
+	main.show_menu()
+	shown_numbers = main.menu_cards.map(func(card): return int(card.get("level_number")))
+	check(shown_numbers == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "Rearranging keeps the unlocked groups visible")
+	main.play_level(10)
+	play_controls = main.content.get_child(2) as HBoxContainer
+	(play_controls.get_child(4) as Button).pressed.emit()
+	check(main.current_level == 1 and main.store.completed.has("1"), "Next puzzle button wraps to the adjacent completed level")
+	play_controls = main.content.get_child(2) as HBoxContainer
+	(play_controls.get_child(2) as Button).pressed.emit()
+	check(main.current_level == 10, "Previous puzzle button wraps to the adjacent level")
 	print("%d checks, %d failures in %.2fs" % [checks, failures, (Time.get_ticks_msec() - started) / 1000.0])
 	quit(1 if failures else 0)
 

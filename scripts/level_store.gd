@@ -5,6 +5,8 @@ const LEVELS_PATH := "user://levels.json"
 const SOURCE_PATH := "res://data/levels.json"
 const PROGRESS_PATH := "user://progress.json"
 const DEFAULT_LINE_COLOR := Color("eae345")
+const GROUP_SIZE := 5
+const GROUP_COMPLETIONS_REQUIRED := 3
 const PREVIOUS_USER_FOLDERS := ["Godot/app_userdata/Unium", "Godot/app_userdata/Afterglow", "Godot/app_userdata/Glimmer", "Godot/app_userdata/Strike-through"]
 
 var levels: Dictionary = {}
@@ -38,7 +40,7 @@ static func _previous_path(folder: String, filename: String) -> String:
 	return OS.get_data_dir().path_join(folder).path_join(filename)
 
 static func group_start(number: int) -> int:
-	return int((number - 1) / 5) * 5 + 1
+	return int((number - 1) / GROUP_SIZE) * GROUP_SIZE + 1
 
 func _load_levels(path: String) -> void:
 	var data := _read_json(path)
@@ -114,7 +116,35 @@ func frontier() -> int:
 	return number
 
 func menu_unlocked() -> int:
-	return maxi(frontier(), unlocked_through)
+	var last := group_start(maxi(1, unlocked_through)) + GROUP_SIZE - 1
+	while _completed_in_group(last - GROUP_SIZE + 1) >= GROUP_COMPLETIONS_REQUIRED:
+		last += GROUP_SIZE
+	return last
+
+func _completed_in_group(first: int) -> int:
+	var count := 0
+	for number in range(first, first + GROUP_SIZE):
+		if completed.get(str(number), false):
+			count += 1
+	return count
+
+func menu_levels() -> Array[int]:
+	var numbers: Array[int] = []
+	for number in range(1, menu_unlocked() + 1):
+		numbers.append(number)
+	return numbers
+
+func adjacent_uncompleted(current: int, direction: int) -> int:
+	var last := menu_unlocked()
+	for offset in range(1, last + 1):
+		var number := posmod(current - 1 + direction * offset, last) + 1
+		if not completed.get(str(number), false):
+			return number
+	return current
+
+func adjacent_level(current: int, direction: int) -> int:
+	var last := menu_unlocked()
+	return posmod(current - 1 + direction, last) + 1
 
 func mark_complete(number: int) -> Error:
 	completed[str(number)] = true
@@ -125,12 +155,22 @@ func complete_first(number: int) -> Error:
 		completed[str(level)] = true
 	return save_progress()
 
+func set_completion_through(number: int) -> Error:
+	if number < 1:
+		return ERR_INVALID_PARAMETER
+	completed.clear()
+	for level in range(1, number + 1):
+		completed[str(level)] = true
+	unlocked_through = 0
+	return save_progress()
+
 func reset_completion_to_first() -> Error:
 	completed = {"1": true}
 	unlocked_through = 0
 	return save_progress()
 
 func save_progress() -> Error:
+	unlocked_through = menu_unlocked()
 	return _atomic_write(PROGRESS_PATH, {"completed": completed, "unlocked_through": unlocked_through})
 
 func save_level(number: int, value: Dictionary) -> Error:
@@ -179,9 +219,10 @@ func delete_level(number: int) -> Error:
 	return _save_shifted_levels(previous_levels, previous_completed)
 
 func rearrange_level(source: int, target: int, action: String, after: bool = false) -> Error:
-	var unlocked := menu_unlocked()
-	if source < 1 or target < 1 or source > unlocked or target > unlocked or source == target:
+	var visible := menu_levels()
+	if source not in visible or target not in visible or source == target:
 		return ERR_INVALID_PARAMETER
+	var unlocked := maxi(menu_unlocked(), maxi(source, target))
 	if action != "insert" and action != "swap":
 		return ERR_INVALID_PARAMETER
 	var previous_levels := levels

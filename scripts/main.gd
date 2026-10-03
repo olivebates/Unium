@@ -2,13 +2,18 @@ extends Control
 
 const CelebrationLines = preload("res://scripts/celebration_lines.gd")
 const RearrangeCard = preload("res://scripts/rearrange_card.gd")
+const MenuThumbnailJob = preload("res://scripts/menu_thumbnail_job.gd")
+const CompletedBadge = preload("res://scripts/completed_badge.gd")
+const SCREEN_TRANSITION_DURATION := 0.2
 
 const BG := Color("0c1219")
 const PANEL := Color("141e28")
 const TEXT := Color("e8eee9")
 const MUTED := Color("88979e")
 const ACCENT := Color("b6ead3")
-const MENU_PAGE_SIZE := 30
+const UNFINISHED_OUTLINE := Color("eae345")
+const COMPLETED_CARD_OUTLINE := Color("60d98d")
+const LOCKED_HINT_OUTLINE := Color("ed5b61")
 const MENU_MAX_COLUMNS := 15
 
 var store := LevelStore.new()
@@ -16,24 +21,47 @@ var screen := "menu"
 var current_level := 1
 var board: PuzzleBoard
 var board_panel: PanelContainer
+var completed_badge: Control
 var background_rect: ColorRect
 var background_tween: Tween
 var palette_tween: Tween
 var palette_text := Color.WHITE
 var palette_button := Color.BLACK
+var palette_theme: Theme
 var menu_hovered_level := 0
 var content: VBoxContainer
 var overlay: Control
 var toast: Label
 var toast_timer := 0.0
 var transition_id := 0
-var menu_page := 0
 var rearrange_mode := false
 var rearrange_action := "insert"
 var menu_rows: VBoxContainer
 var menu_cards: Array[Button] = []
+var menu_hint: PanelContainer
+var screen_shake_tween: Tween
+var screen_shake_offsets: Array[Vector2] = []
+var shake_rng := RandomNumberGenerator.new()
 var menu_columns := 0
 var menu_thumbnail_cache: Dictionary = {}
+var menu_thumbnail_queue: Array[int] = []
+var menu_thumbnail_task := -1
+var menu_thumbnail_job: RefCounted
+var pending_menu_level := 0
+var menu_scroll: ScrollContainer
+var menu_scroll_position := 0
+var screen_transition: Control
+var screen_transition_tween: Tween
+var transition_new_shell: Control
+var transition_board: PuzzleBoard
+var transition_board_parent: Control
+var transition_hidden_card: Control
+var saved_menu: Dictionary = {}
+var outgoing_menu: Dictionary = {}
+var active_menu_signature := 0
+var active_shell: Control
+var held_shell: Control
+var transition_old_shell: Control
 var menu_drag_source := 0
 var menu_drag_target := 0
 var menu_drag_after := false
@@ -86,31 +114,39 @@ var color_paste_button: Button
 
 func _ready() -> void:
 	RenderingServer.set_default_clear_color(BG)
+	shake_rng.randomize()
 	_build_theme()
-	resized.connect(_update_menu_columns)
+	resized.connect(func():
+		_finish_screen_transition()
+		_update_menu_columns()
+	)
 	show_menu()
 
 func _update_menu_columns() -> void:
 	if not is_instance_valid(menu_rows):
 		return
-	var columns := mini(MENU_MAX_COLUMNS, maxi(1, int((size.x - 88 + 12) / 76)))
+	var columns := mini(MENU_MAX_COLUMNS, maxi(1, int((size.x - 88 - 16 + 12) / 76)))
 	menu_rows.custom_minimum_size.x = columns * 64 + (columns - 1) * 12
 	if columns == menu_columns and menu_rows.get_child_count() > 0:
 		return
 	menu_columns = columns
 	for row in menu_rows.get_children():
-		for card in row.get_children():
-			row.remove_child(card)
+		for item in row.get_children():
+			row.remove_child(item)
 		menu_rows.remove_child(row)
 		row.queue_free()
-	for first in range(0, menu_cards.size(), columns):
+	var items: Array[Control] = []
+	items.assign(menu_cards)
+	if is_instance_valid(menu_hint):
+		items.append(menu_hint)
+	for first in range(0, items.size(), columns):
 		var row := HBoxContainer.new()
 		row.alignment = BoxContainer.ALIGNMENT_BEGIN
 		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_theme_constant_override("separation", 12)
 		menu_rows.add_child(row)
-		for index in range(first, mini(first + columns, menu_cards.size())):
-			row.add_child(menu_cards[index])
+		for index in range(first, mini(first + columns, items.size())):
+			row.add_child(items[index])
 
 func _build_theme() -> void:
 	var theme_resource := Theme.new()
@@ -145,6 +181,7 @@ func _build_theme() -> void:
 			style.set_border_width_all(2)
 		theme_resource.set_stylebox(state, "Button", style)
 	theme = theme_resource
+	palette_theme = theme_resource.duplicate(true)
 
 func _apply_ui_palette(color: Color) -> void:
 	_apply_ui_colors(_ui_text_color(color), _ui_button_color(color))
@@ -156,14 +193,19 @@ func _ui_button_color(color: Color) -> Color:
 	return PuzzleBoard.menu_button_color(color) if screen == "menu" else PuzzleBoard.button_color(color)
 
 func _apply_ui_colors(light: Color, dark: Color) -> void:
+	if palette_text.is_equal_approx(light) and palette_button.is_equal_approx(dark):
+		return
 	palette_text = light
 	palette_button = dark
+	palette_theme.set_block_signals(true)
 	for kind in ["Label", "Button", "LineEdit", "SpinBox"]:
-		theme.set_color("font_color", kind, light)
+		palette_theme.set_color("font_color", kind, light)
 	for state in ["font_hover_color", "font_pressed_color", "font_focus_color", "font_disabled_color"]:
-		theme.set_color(state, "Button", light)
+		palette_theme.set_color(state, "Button", light)
 	_style_buttons("Button", dark, light)
 	_style_buttons("PrimaryButton", PuzzleBoard.balanced_color(dark.h, 0.50, 0.12), light)
+	palette_theme.set_block_signals(false)
+	palette_theme.emit_changed()
 
 func _style_buttons(kind: String, base: Color, text_color: Color) -> void:
 	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
@@ -172,22 +214,27 @@ func _style_buttons(kind: String, base: Color, text_color: Color) -> void:
 			fill = PuzzleBoard.balanced_color(base.h, base.s, PuzzleBoard.luminance(base) + 0.012)
 		elif state == "pressed":
 			fill = PuzzleBoard.balanced_color(base.h, base.s, maxf(0.02, PuzzleBoard.luminance(base) - 0.012))
-		var style := box(fill, 12)
-		style.content_margin_left = 20
-		style.content_margin_right = 20
-		style.content_margin_top = 12
-		style.content_margin_bottom = 12
+		if not palette_theme.has_stylebox(state, kind):
+			var initial := box(fill, 12)
+			initial.content_margin_left = 20
+			initial.content_margin_right = 20
+			initial.content_margin_top = 12
+			initial.content_margin_bottom = 12
+			palette_theme.set_stylebox(state, kind, initial)
+		var style := palette_theme.get_stylebox(state, kind) as StyleBoxFlat
+		style.bg_color = fill
 		if state == "focus":
 			style.bg_color = Color.TRANSPARENT
 			style.border_color = text_color
 			style.set_border_width_all(2)
-		theme.set_stylebox(state, kind, style)
 
 func _animate_ui_palette(target_color: Color, duration: float, from_text: Color, from_button: Color) -> void:
 	if palette_tween and palette_tween.is_running():
 		palette_tween.kill()
 	var target_text := _ui_text_color(target_color)
 	var target_button := _ui_button_color(target_color)
+	if from_text.is_equal_approx(target_text) and from_button.is_equal_approx(target_button):
+		return
 	_apply_ui_colors(from_text, from_button)
 	palette_tween = create_tween()
 	palette_tween.tween_method(func(progress: float):
@@ -221,8 +268,181 @@ func spacer(parent: Control) -> Control:
 	parent.add_child(node)
 	return node
 
-func _shell() -> void:
+func _take_outgoing_shell() -> Control:
+	_finish_screen_transition()
+	held_shell = active_shell
+	held_shell.process_mode = Node.PROCESS_MODE_DISABLED
+	return held_shell
+
+func _finish_screen_transition() -> void:
+	if screen_transition_tween:
+		screen_transition_tween.kill()
+	screen_transition_tween = null
+	if is_instance_valid(transition_board) and is_instance_valid(transition_board_parent):
+		transition_board.reparent(transition_board_parent)
+		transition_board.scale = Vector2.ONE
+		transition_board.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		transition_board.set_process_input(true)
+	if is_instance_valid(transition_new_shell):
+		transition_new_shell.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		transition_new_shell.modulate = Color.WHITE
+	if is_instance_valid(transition_hidden_card):
+		transition_hidden_card.modulate.a = 1.0
+	if not outgoing_menu.is_empty():
+		_discard_saved_menu()
+		var retained: Control = outgoing_menu.wrapper
+		retained.hide()
+		retained.modulate = Color.WHITE
+		retained.position = Vector2.ZERO
+		for card in outgoing_menu.cards:
+			if card.has_meta("hover_tween"):
+				(card.get_meta("hover_tween") as Tween).kill()
+			for child in card.get_children():
+				if child is Control:
+					child.scale = Vector2.ONE
+		saved_menu = outgoing_menu
+		outgoing_menu = {}
+	elif is_instance_valid(transition_old_shell):
+		remove_child(transition_old_shell)
+		transition_old_shell.queue_free()
+	if is_instance_valid(screen_transition):
+		remove_child(screen_transition)
+		screen_transition.queue_free()
+	if is_instance_valid(board) and screen == "play":
+		board.set_process_input(true)
+	screen_transition = null
+	transition_new_shell = null
+	transition_board = null
+	transition_board_parent = null
+	transition_hidden_card = null
+	transition_old_shell = null
+
+func _menu_signature() -> int:
+	return hash([store.menu_unlocked(), store.completed, store.levels, store.colors])
+
+func _discard_saved_menu() -> void:
+	if not saved_menu.is_empty() and is_instance_valid(saved_menu.wrapper):
+		if saved_menu.wrapper.get_parent() == self:
+			remove_child(saved_menu.wrapper)
+		saved_menu.wrapper.queue_free()
+	saved_menu = {}
+
+func _restore_saved_menu() -> void:
+	var wrapper: Control = saved_menu.wrapper
+	active_shell = wrapper
+	wrapper.theme = palette_theme
+	wrapper.show()
+	wrapper.process_mode = Node.PROCESS_MODE_INHERIT
+	wrapper.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	content = saved_menu.content
+	menu_rows = saved_menu.rows
+	menu_cards.assign(saved_menu.cards)
+	menu_hint = saved_menu.hint
+	menu_scroll = saved_menu.scroll
+	menu_columns = saved_menu.columns
+	active_menu_signature = saved_menu.signature
+	saved_menu = {}
+	_update_menu_columns()
+	for card in menu_cards:
+		var number := int(card.get("level_number"))
+		var cached: Dictionary = menu_thumbnail_cache.get(number, {})
+		if cached.get("signature") == _thumbnail_signature(number):
+			(card.get_child(0) as TextureRect).texture = cached.texture
+		else:
+			menu_thumbnail_queue.append(number)
+
+func _card_board_transform(puzzle: PuzzleBoard, card_rect: Rect2) -> Dictionary:
+	var cell := 96.0 / maxi(puzzle.width, puzzle.height)
+	var origin := (Vector2(128, 128) - Vector2(puzzle.width, puzzle.height) * cell) * 0.5
+	var geometry := puzzle.geometry()
+	var factor: float = (cell * card_rect.size.x / 128.0) / geometry.cell
+	return {"position": card_rect.position + origin * card_rect.size / 128.0 - geometry.origin * factor, "scale": Vector2.ONE * factor}
+
+func _start_screen_transition(outgoing: Control, kind: String, old_board: PuzzleBoard = null, card_rect: Rect2 = Rect2(), source_card: Control = null, direction: int = 1) -> void:
+	var layer := Control.new()
+	layer.theme = palette_theme
+	layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	layer.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(layer)
+	screen_transition = layer
+	transition_old_shell = outgoing
+	held_shell = null
+	var incoming := active_shell
+	transition_new_shell = incoming
+	incoming.modulate.a = 0.0
+	if is_instance_valid(board):
+		board.set_process_input(false)
+	if is_instance_valid(old_board):
+		old_board.set_process_input(false)
+	var blocker := Control.new()
+	blocker.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	blocker.mouse_filter = Control.MOUSE_FILTER_STOP
+	layer.add_child(blocker)
+	# Let containers resolve the destination once; animate transforms thereafter.
+	await get_tree().process_frame
+	if not is_instance_valid(layer) or screen_transition != layer:
+		return
+	await get_tree().process_frame
+	if not is_instance_valid(layer) or screen_transition != layer:
+		return
+	if kind == "close":
+		var index := _menu_card_index(current_level)
+		if index >= 0:
+			menu_scroll.ensure_control_visible(menu_cards[index])
+			await get_tree().process_frame
+			if not is_instance_valid(layer) or screen_transition != layer:
+				return
+	var tween := create_tween().set_parallel(true)
+	screen_transition_tween = tween
+	tween.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	if kind == "slide":
+		incoming.modulate.a = 1.0
+		incoming.position.x = size.x * direction
+		tween.tween_property(outgoing, "position:x", -size.x * direction, SCREEN_TRANSITION_DURATION)
+		tween.tween_property(incoming, "position:x", 0.0, SCREEN_TRANSITION_DURATION)
+	else:
+		var moving_board := board if kind == "open" else old_board
+		if kind == "close":
+			var index := _menu_card_index(current_level)
+			if index >= 0:
+				source_card = menu_cards[index]
+				card_rect = source_card.get_global_rect()
+		if is_instance_valid(moving_board) and card_rect.has_area():
+			var full_rect := moving_board.get_global_rect()
+			if kind == "open":
+				transition_board = moving_board
+				transition_board_parent = moving_board.get_parent() as Control
+			moving_board.reparent(layer)
+			moving_board.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+			moving_board.size = full_rect.size
+			moving_board.position = full_rect.position
+			moving_board.process_mode = Node.PROCESS_MODE_INHERIT
+			var small := _card_board_transform(moving_board, card_rect)
+			if is_instance_valid(source_card):
+				transition_hidden_card = source_card
+				source_card.modulate.a = 0.0
+			if kind == "open":
+				moving_board.position = small.position
+				moving_board.scale = small.scale
+				tween.tween_property(moving_board, "position", full_rect.position, SCREEN_TRANSITION_DURATION)
+				tween.tween_property(moving_board, "scale", Vector2.ONE, SCREEN_TRANSITION_DURATION)
+			else:
+				tween.tween_property(moving_board, "position", small.position, SCREEN_TRANSITION_DURATION)
+				tween.tween_property(moving_board, "scale", small.scale, SCREEN_TRANSITION_DURATION)
+			layer.move_child(blocker, -1)
+		tween.tween_property(outgoing, "modulate:a", 0.0, SCREEN_TRANSITION_DURATION)
+		tween.tween_property(incoming, "modulate:a", 1.0, SCREEN_TRANSITION_DURATION)
+	tween.finished.connect(_finish_screen_transition)
+
+func _shell(restore_menu: bool = false) -> void:
+	_finish_screen_transition()
+	if screen_shake_tween and screen_shake_tween.is_running():
+		screen_shake_tween.kill()
+	screen_shake_tween = null
+	position = Vector2.ZERO
 	_cancel_menu_drag()
+	menu_thumbnail_queue.clear()
+	pending_menu_level = 0
 	transition_id += 1
 	if background_tween and background_tween.is_running():
 		background_tween.kill()
@@ -230,13 +450,21 @@ func _shell() -> void:
 	if palette_tween and palette_tween.is_running():
 		palette_tween.kill()
 	palette_tween = null
+	# Each screen owns its palette. Moving/fading screens must not invalidate
+	# each other's controls (or the retained menu) on every animation frame.
+	palette_theme = palette_theme.duplicate(true)
 	for child in get_children():
+		if child == held_shell or (not saved_menu.is_empty() and child == saved_menu.wrapper):
+			continue
 		remove_child(child)
 		child.queue_free()
 	board = null
 	board_panel = null
+	completed_badge = null
 	menu_rows = null
 	menu_cards.clear()
+	menu_hint = null
+	menu_scroll = null
 	menu_columns = 0
 	background_rect = null
 	toast = null
@@ -245,14 +473,22 @@ func _shell() -> void:
 	background_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	background_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(background_rect)
+	move_child(background_rect, 0)
 	_set_background_for_level(editor_level if screen == "editor" else (current_level if screen == "play" else (menu_hovered_level if menu_hovered_level > 0 else store.frontier())))
+	if restore_menu:
+		_restore_saved_menu()
+		return
+	active_shell = Control.new()
+	active_shell.theme = palette_theme
+	active_shell.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	add_child(active_shell)
 	var margins := MarginContainer.new()
 	margins.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	for side in ["left", "right"]:
 		margins.add_theme_constant_override("margin_" + side, 44)
 	for side in ["top", "bottom"]:
 		margins.add_theme_constant_override("margin_" + side, 28)
-	add_child(margins)
+	active_shell.add_child(margins)
 	content = VBoxContainer.new()
 	content.add_theme_constant_override("separation", 22)
 	margins.add_child(content)
@@ -261,15 +497,25 @@ func _shell() -> void:
 		content.add_child(header)
 		header.add_child(label("H e a r t h l i n e", 28))
 		spacer(header)
-		header.add_child(button("Play level %d   →" % store.frontier(), func(): play_level(store.frontier()), true))
+		header.add_child(button("Play", func(): _select_menu_level(store.frontier()), true))
 		var separator := HSeparator.new()
 		separator.modulate = Color(1, 1, 1, 0.16)
 		content.add_child(separator)
 
 func show_menu() -> void:
+	_finish_screen_transition()
+	var old_board := board
+	var outgoing: Control = _take_outgoing_shell() if screen == "play" and is_instance_valid(board) else null
 	screen = "menu"
 	color_mode = false
-	_shell()
+	var restore_menu: bool = not rearrange_mode and not saved_menu.is_empty() and saved_menu.signature == _menu_signature()
+	if not restore_menu:
+		_discard_saved_menu()
+	_shell(restore_menu)
+	if restore_menu:
+		if outgoing:
+			_start_screen_transition(outgoing, "close", old_board)
+		return
 	if rearrange_mode:
 		var tools_row := HBoxContainer.new()
 		content.add_child(tools_row)
@@ -280,38 +526,88 @@ func show_menu() -> void:
 		tools_row.add_child(button("Done", _toggle_rearrange))
 		content.add_child(label("Choose Insert or Swap, then drag between or over levels to preview the move. Insert uses the left or right half for before or after.", 14, MUTED))
 	var scroll := ScrollContainer.new()
+	menu_scroll = scroll
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_ALWAYS
 	content.add_child(scroll)
 	var rows := VBoxContainer.new()
 	menu_rows = rows
 	rows.add_theme_constant_override("separation", 12)
 	var centered_rows := HBoxContainer.new()
 	centered_rows.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	scroll.add_child(centered_rows)
+	var hover_margin := MarginContainer.new()
+	hover_margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for side in ["left", "right", "top", "bottom"]:
+		hover_margin.add_theme_constant_override("margin_" + side, 4)
+	scroll.add_child(hover_margin)
+	hover_margin.add_child(centered_rows)
 	spacer(centered_rows)
 	centered_rows.add_child(rows)
 	spacer(centered_rows)
-	var unlocked := store.menu_unlocked()
-	menu_page = clampi(menu_page, 0, int((unlocked - 1) / MENU_PAGE_SIZE))
-	var first := 1 if rearrange_mode else menu_page * MENU_PAGE_SIZE + 1
-	var last := unlocked + 1 if rearrange_mode else mini(unlocked + 1, (menu_page + 1) * MENU_PAGE_SIZE + 1)
-	for number in range(first, last):
+	var visible_levels := store.menu_levels()
+	for number in visible_levels:
 		menu_cards.append(_level_card(number))
+	menu_hint = _locked_group_hint()
 	_update_menu_columns()
-	if unlocked > MENU_PAGE_SIZE and not rearrange_mode:
-		var pages := HBoxContainer.new()
-		content.add_child(pages)
-		var previous := button("← Previous", func(): menu_page -= 1; show_menu())
-		previous.disabled = menu_page == 0
-		pages.add_child(previous)
-		spacer(pages)
-		pages.add_child(label("Page %d" % (menu_page + 1), 14, MUTED))
-		spacer(pages)
-		var next := button("Next →", func(): menu_page += 1; show_menu())
-		next.disabled = (menu_page + 1) * MENU_PAGE_SIZE >= unlocked
-		pages.add_child(next)
+	active_menu_signature = _menu_signature()
+	scroll.set_deferred("scroll_vertical", menu_scroll_position)
+	if outgoing:
+		_start_screen_transition(outgoing, "close", old_board)
+
+func _locked_group_hint() -> PanelContainer:
+	var hint := PanelContainer.new()
+	hint.custom_minimum_size = Vector2(64, 64)
+	hint.size_flags_horizontal = Control.SIZE_FILL
+	hint.mouse_filter = Control.MOUSE_FILTER_STOP
+	hint.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	hint.pivot_offset = Vector2(32, 32)
+	var hint_style := box(Color("46505a"), 9)
+	hint_style.border_color = LOCKED_HINT_OUTLINE
+	hint_style.set_border_width_all(2)
+	hint.add_theme_stylebox_override("panel", hint_style)
+	var question := label("?", 32)
+	question.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	question.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	question.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hint.add_child(question)
+	hint.mouse_entered.connect(func(): _animate_locked_hint(hint, true))
+	hint.mouse_exited.connect(func(): _animate_locked_hint(hint, false))
+	hint.gui_input.connect(_on_locked_hint_input)
+	return hint
+
+func _animate_locked_hint(hint: PanelContainer, hovered: bool) -> void:
+	if not is_instance_valid(hint) or not hint.is_inside_tree():
+		return
+	if hint.has_meta("hover_tween"):
+		var previous: Tween = hint.get_meta("hover_tween")
+		if previous.is_running():
+			previous.kill()
+	var tween := hint.create_tween()
+	hint.set_meta("hover_tween", tween)
+	tween.tween_property(hint, "scale", Vector2.ONE * (1.08 if hovered else 1.0), 0.14).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+
+func _on_locked_hint_input(event: InputEvent) -> void:
+	if screen != "menu" or not event is InputEventMouseButton or event.button_index != MOUSE_BUTTON_LEFT or not event.pressed:
+		return
+	_shake_screen()
+	get_viewport().set_input_as_handled()
+
+func _shake_screen() -> void:
+	if screen_shake_tween and screen_shake_tween.is_running():
+		screen_shake_tween.kill()
+	position = Vector2.ZERO
+	screen_shake_offsets.clear()
+	screen_shake_tween = create_tween()
+	var hops := shake_rng.randi_range(8, 10)
+	for index in range(hops):
+		var strength := 1.0 - float(index) / float(hops)
+		var distance := shake_rng.randf_range(5.0, 12.0) * strength + 1.5
+		var offset := Vector2.from_angle(shake_rng.randf_range(-PI, PI)) * distance
+		screen_shake_offsets.append(offset)
+		screen_shake_tween.tween_property(self, "position", offset, shake_rng.randf_range(0.017, 0.023)).set_trans(Tween.TRANS_SINE)
+	screen_shake_tween.tween_property(self, "position", Vector2.ZERO, 0.035).set_trans(Tween.TRANS_SINE)
 
 func _level_card(number: int) -> Button:
 	var card := RearrangeCard.new()
@@ -321,14 +617,21 @@ func _level_card(number: int) -> Button:
 	if rearrange_mode:
 		card.drag_pressed.connect(_start_menu_drag)
 	else:
-		card.pressed.connect(func(): play_level(number))
+		card.pressed.connect(func(): _on_menu_card_pressed(number))
 	card.mouse_entered.connect(func():
 		if screen == "menu" and not color_mode and menu_drag_source == 0:
 			menu_hovered_level = number
 			_set_background_for_level(number, true)
+			if not rearrange_mode:
+				_animate_menu_card_hover(card, true)
+	)
+	card.mouse_exited.connect(func():
+		if not rearrange_mode:
+			_animate_menu_card_hover(card, false)
 	)
 	card.custom_minimum_size = Vector2(64, 64)
 	card.size_flags_horizontal = Control.SIZE_FILL
+	card.pivot_offset = Vector2(32, 32)
 	var preview := TextureRect.new()
 	preview.position = Vector2.ZERO
 	preview.size = Vector2(64, 64)
@@ -336,70 +639,123 @@ func _level_card(number: int) -> Button:
 	preview.stretch_mode = TextureRect.STRETCH_SCALE
 	preview.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	card.add_child(preview)
-	var level := store.get_level(number)
-	var tint := store.get_color(number)
-	var line_tint := store.get_line_color(number)
-	var signature := hash([level.width, level.height, level.tiles, tint.to_html(), line_tint.to_html()])
+	var completed: bool = store.completed.get(str(number), false)
+	var signature := _thumbnail_signature(number)
 	var cached: Dictionary = menu_thumbnail_cache.get(number, {})
 	if cached.get("signature") == signature:
 		preview.texture = cached.texture
 	else:
-		# Render each level once, then release its viewport. Dragging only moves textures.
-		var viewport := SubViewport.new()
-		viewport.size = Vector2i(128, 128)
-		viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
-		viewport.gui_disable_input = true
-		preview.add_child(viewport)
-		var miniature := PuzzleBoard.new()
-		miniature.size = Vector2(128, 128)
-		miniature.thumbnail_mode = true
-		viewport.add_child(miniature)
-		miniature.configure(level, tint, line_tint)
-		miniature.locked = true
-		miniature.set_process_input(false)
-		preview.texture = viewport.get_texture()
-		_cache_menu_thumbnail(number, signature, viewport, preview)
-	var number_label := label("%d" % number, 11)
-	number_label.position = Vector2(5, 45)
-	number_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_outline_label(number_label)
-	card.add_child(number_label)
-	if store.completed.get(str(number), false):
-		var checkmark := label("✓", 18)
-		checkmark.position = Vector2(41, 39)
-		checkmark.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		_outline_label(checkmark)
-		card.add_child(checkmark)
+		menu_thumbnail_queue.append(number)
 	var outline := Panel.new()
 	outline.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	outline.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var outline_style := box(Color.TRANSPARENT, 9)
-	outline_style.border_color = PuzzleBoard.tile_color(0, store.get_color(number))
+	outline_style.border_color = COMPLETED_CARD_OUTLINE if completed else UNFINISHED_OUTLINE
 	outline_style.set_border_width_all(2)
 	outline.add_theme_stylebox_override("panel", outline_style)
 	card.add_child(outline)
 	return card
 
-func _cache_menu_thumbnail(number: int, signature: int, viewport: SubViewport, preview: TextureRect) -> void:
-	await RenderingServer.frame_post_draw
-	if not is_instance_valid(viewport) or not is_instance_valid(preview):
+func _animate_menu_card_hover(card: Control, hovered: bool) -> void:
+	if not is_instance_valid(card) or not card.is_inside_tree():
 		return
-	if not preview.is_inside_tree():
+	if card.has_meta("hover_tween"):
+		var previous: Tween = card.get_meta("hover_tween")
+		if previous.is_running():
+			previous.kill()
+	var tween := card.create_tween()
+	card.set_meta("hover_tween", tween)
+	tween.set_parallel(true)
+	# Container layout resets the Button's transform when the palette changes.
+	# Its visual children have stable geometry and can grow without relayout.
+	for child in card.get_children():
+		if child is Control:
+			child.pivot_offset = Vector2(32, 32) - child.position
+			tween.tween_property(child, "scale", Vector2.ONE * (1.08 if hovered else 1.0), 0.14).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+
+func _thumbnail_signature(number: int) -> int:
+	return hash([number, store.levels.get(str(number), {}), store.get_color(number).to_html()])
+
+func _select_menu_level(number: int) -> void:
+	if store.levels.has(str(number)) or store.cache.has(number):
+		play_level(number)
+	else:
+		pending_menu_level = number
+		menu_thumbnail_queue.erase(number)
+		menu_thumbnail_queue.push_front(number)
+
+func _on_menu_card_pressed(number: int) -> void:
+	if screen == "menu" and pressed_keys.has(KEY_SHIFT) and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_B) and _only_keys([KEY_SHIFT, KEY_Z, KEY_B]):
+		var result := store.set_completion_through(number)
+		if result != OK:
+			_show_toast("Progress could not be saved: " + error_string(result))
+			return
+		menu_scroll_position = menu_scroll.scroll_vertical if is_instance_valid(menu_scroll) else 0
+		menu_hovered_level = 0
+		show_menu()
 		return
-	var snapshot := viewport.get_texture().get_image()
-	if snapshot.is_empty():
+	_select_menu_level(number)
+
+func _process_menu_thumbnails() -> void:
+	if menu_thumbnail_task >= 0:
+		if not WorkerThreadPool.is_task_completed(menu_thumbnail_task):
+			return
+		WorkerThreadPool.wait_for_task_completion(menu_thumbnail_task)
+		menu_thumbnail_task = -1
+		var number: int = menu_thumbnail_job.number
+		var result: Dictionary = menu_thumbnail_job.result
+		if not store.levels.has(str(number)) and menu_thumbnail_job.signature == _thumbnail_signature(number):
+			store.cache[number] = result.level
+		if result.error == OK and menu_thumbnail_job.signature == _thumbnail_signature(number):
+			var texture := ImageTexture.create_from_image(result.image)
+			menu_thumbnail_cache[number] = {"signature": menu_thumbnail_job.signature, "texture": texture}
+			var index := _menu_card_index(number)
+			if screen == "menu" and index >= 0:
+				(menu_cards[index].get_child(0) as TextureRect).texture = texture
+		menu_thumbnail_job = null
+		if screen == "menu" and pending_menu_level == number:
+			play_level(number)
+			return
+	if screen != "menu" or menu_thumbnail_queue.is_empty() or is_instance_valid(screen_transition):
 		return
-	var texture := ImageTexture.create_from_image(snapshot)
-	menu_thumbnail_cache[number] = {"signature": signature, "texture": texture}
-	preview.texture = texture
-	viewport.queue_free()
+	if pending_menu_level == 0 and is_instance_valid(menu_scroll):
+		var visible_rect := menu_scroll.get_global_rect()
+		for queued in menu_thumbnail_queue:
+			var index := _menu_card_index(queued)
+			if index >= 0 and visible_rect.intersects(menu_cards[index].get_global_rect()):
+				menu_thumbnail_queue.erase(queued)
+				menu_thumbnail_queue.push_front(queued)
+				break
+	var number: int = menu_thumbnail_queue.pop_front()
+	var cached: Dictionary = menu_thumbnail_cache.get(number, {})
+	if cached.get("signature") == _thumbnail_signature(number) and (store.levels.has(str(number)) or store.cache.has(number)):
+		return
+	var job := MenuThumbnailJob.new()
+	job.number = number
+	job.signature = _thumbnail_signature(number)
+	job.tint = store.get_color(number)
+	if store.levels.has(str(number)) or store.cache.has(number):
+		job.layout = store.get_level(number)
+	menu_thumbnail_job = job
+	menu_thumbnail_task = WorkerThreadPool.add_task(job.run)
+
+func _exit_tree() -> void:
+	if menu_thumbnail_task >= 0:
+		WorkerThreadPool.wait_for_task_completion(menu_thumbnail_task)
+	saved_menu = {}
 
 func _start_menu_drag(source: int, pointer: Vector2) -> void:
-	if not rearrange_mode or screen != "menu":
+	if not rearrange_mode or screen != "menu" or _menu_card_index(source) < 0:
 		return
 	_cancel_menu_drag()
 	menu_drag_source = source
 	menu_drag_origin = pointer
+
+func _menu_card_index(number: int) -> int:
+	for index in range(menu_cards.size()):
+		if int(menu_cards[index].get("level_number")) == number:
+			return index
+	return -1
 
 func _menu_drag_slots() -> Array[Vector2]:
 	var slots: Array[Vector2] = []
@@ -414,20 +770,16 @@ func _update_menu_drag(pointer: Vector2) -> void:
 		if pointer.distance_to(menu_drag_origin) < 6.0:
 			return
 		menu_dragging = true
-		var source_card := menu_cards[menu_drag_source - 1]
+		var source_card := menu_cards[_menu_card_index(menu_drag_source)]
 		source_card.modulate.a = 0.0
 		menu_drag_icon = TextureRect.new()
+		menu_drag_icon.theme = palette_theme
 		menu_drag_icon.texture = (source_card.get_child(0) as TextureRect).texture
 		menu_drag_icon.size = Vector2(64, 64)
 		menu_drag_icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		menu_drag_icon.stretch_mode = TextureRect.STRETCH_SCALE
 		menu_drag_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		menu_drag_icon.modulate.a = 0.9
-		var number_label := label("%d" % menu_drag_source, 11)
-		number_label.position = Vector2(5, 45)
-		number_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		_outline_label(number_label)
-		menu_drag_icon.add_child(number_label)
 		add_child(menu_drag_icon)
 		menu_drag_icon.size = Vector2(64, 64)
 	menu_drag_icon.position = pointer - Vector2(32, 32)
@@ -440,10 +792,10 @@ func _update_menu_drag(pointer: Vector2) -> void:
 		var candidate := pointer.distance_squared_to(slots[index] + Vector2(32, 32))
 		if candidate < distance:
 			distance = candidate
-			target = index + 1
+			target = int(menu_cards[index].get("level_number"))
 	if target == menu_drag_source:
 		target = 0
-	var after := target > 0 and pointer.x >= slots[target - 1].x + 32.0
+	var after := target > 0 and pointer.x >= slots[_menu_card_index(target)].x + 32.0
 	if target != menu_drag_target or after != menu_drag_after:
 		menu_drag_target = target
 		menu_drag_after = after
@@ -453,9 +805,9 @@ func _animate_menu_drag_preview(slots: Array[Vector2]) -> void:
 	var order: Array[int] = []
 	for index in range(menu_cards.size()):
 		order.append(index)
+	var source_index := _menu_card_index(menu_drag_source)
 	if menu_drag_target > 0:
-		var source_index := menu_drag_source - 1
-		var target_index := menu_drag_target - 1
+		var target_index := _menu_card_index(menu_drag_target)
 		if rearrange_action == "swap":
 			order[source_index] = target_index
 			order[target_index] = source_index
@@ -470,7 +822,7 @@ func _animate_menu_drag_preview(slots: Array[Vector2]) -> void:
 	for slot in range(order.size()):
 		destinations[order[slot]] = slot
 	for index in range(menu_cards.size()):
-		if index == menu_drag_source - 1:
+		if index == source_index:
 			continue
 		var card := menu_cards[index]
 		var destination: Vector2 = slots[destinations[index]] - card.get_parent().global_position
@@ -522,7 +874,6 @@ func _toggle_rearrange() -> void:
 	if screen != "menu":
 		return
 	rearrange_mode = not rearrange_mode
-	menu_page = 0
 	show_menu()
 
 func _rearrange_level(source: int, target: int, after: bool) -> void:
@@ -533,11 +884,22 @@ func _rearrange_level(source: int, target: int, after: bool) -> void:
 	menu_hovered_level = 0
 	show_menu()
 
-func _outline_label(node: Label) -> void:
-	node.add_theme_constant_override("outline_size", 3)
-	node.add_theme_color_override("font_outline_color", Color.BLACK)
-
-func play_level(number: int, restore: Array = []) -> void:
+func play_level(number: int, restore: Array = [], navigation_direction: int = 0) -> void:
+	_finish_screen_transition()
+	var old_screen := screen
+	var old_number := current_level
+	var source_card: Control
+	var card_rect := Rect2()
+	if screen == "menu":
+		menu_scroll_position = menu_scroll.scroll_vertical if is_instance_valid(menu_scroll) else 0
+		var index := _menu_card_index(number)
+		if index >= 0:
+			source_card = menu_cards[index]
+			card_rect = (source_card.get_child(0) as Control).get_global_rect()
+	var outgoing: Control = _take_outgoing_shell() if (screen == "menu" or (screen == "play" and number != current_level)) and is_instance_valid(content) else null
+	var retained_menu: Dictionary = {}
+	if outgoing and old_screen == "menu" and not rearrange_mode:
+		retained_menu = {"wrapper": outgoing, "signature": active_menu_signature, "content": content, "rows": menu_rows, "cards": menu_cards.duplicate(), "hint": menu_hint, "scroll": menu_scroll, "columns": menu_columns}
 	var previous_text := palette_text
 	var previous_button := palette_button
 	var previous_level := -1
@@ -548,13 +910,14 @@ func play_level(number: int, restore: Array = []) -> void:
 	var previous_background: Color = background_rect.color if is_instance_valid(background_rect) else (PuzzleBoard.background_color(store.get_color(previous_level)) if previous_level > 0 else BG)
 	var changing_set := previous_level > 0 and LevelStore.group_start(previous_level) != LevelStore.group_start(number)
 	var tint := store.get_color(number)
-	var fade_duration := 0.60 if changing_set else 0.30
+	var fade_duration := SCREEN_TRANSITION_DURATION
 	current_level = number
 	screen = "play"
 	color_mode = false
 	_shell()
 	var level := store.get_level(number)
 	content.add_child(label("Level %d" % number, 38))
+	_show_completed_badge()
 	var panel := PanelContainer.new()
 	board_panel = panel
 	panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -564,6 +927,7 @@ func play_level(number: int, restore: Array = []) -> void:
 	play_area.custom_minimum_size = Vector2(340, 320)
 	panel.add_child(play_area)
 	board = PuzzleBoard.new()
+	board.show_start_finish = number == 1
 	board.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	play_area.add_child(board)
 	board.configure(level, tint, store.get_line_color(number))
@@ -572,12 +936,40 @@ func play_level(number: int, restore: Array = []) -> void:
 	board.solved.connect(_complete_level)
 	var controls := HBoxContainer.new()
 	content.add_child(controls)
-	controls.add_child(button("← All puzzles", show_menu))
+	controls.add_child(button("▦ All puzzles", show_menu))
+	spacer(controls)
+	controls.add_child(button("← Previous puzzle", func(): _open_adjacent_level(-1)))
 	controls.add_child(button("↻ Reset line", func(): board.clear_path()))
+	controls.add_child(button("Next puzzle →", func(): _open_adjacent_level(1)))
 	if changing_set or not previous_background.is_equal_approx(PuzzleBoard.background_color(tint)):
 		_animate_level_background(previous_background, PuzzleBoard.background_color(tint), fade_duration)
-	if changing_set or not previous_text.is_equal_approx(PuzzleBoard.text_color(tint)):
+	if not outgoing and (changing_set or not previous_text.is_equal_approx(PuzzleBoard.text_color(tint))):
 		_animate_ui_palette(tint, fade_duration, previous_text, previous_button)
+	if outgoing:
+		outgoing_menu = retained_menu
+		var direction := navigation_direction if navigation_direction != 0 else (1 if number > old_number else -1)
+		_start_screen_transition(outgoing, "open" if old_screen == "menu" else "slide", null, card_rect, source_card, direction)
+
+func _open_adjacent_level(direction: int) -> void:
+	var next := store.adjacent_level(current_level, direction)
+	if next != current_level:
+		play_level(next, [], direction)
+
+func _show_completed_badge() -> void:
+	if screen != "play" or not store.completed.get(str(current_level), false) or is_instance_valid(completed_badge):
+		return
+	completed_badge = CompletedBadge.new()
+	active_shell.add_child(completed_badge)
+	completed_badge.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	completed_badge.offset_left = -116
+	completed_badge.offset_right = -44
+	completed_badge.offset_top = 20
+	completed_badge.offset_bottom = 92
+
+func _open_adjacent_uncompleted(direction: int) -> void:
+	var next := store.adjacent_uncompleted(current_level, direction)
+	if next != current_level:
+		play_level(next, [], direction)
 
 func _set_board_tint(color: Color, selected_line: Color = Color.TRANSPARENT) -> void:
 	if not palette_text.is_equal_approx(PuzzleBoard.text_color(color)):
@@ -623,11 +1015,13 @@ func _animate_level_background(previous: Color, target: Color, duration: float =
 
 func _complete_level() -> void:
 	var result := store.mark_complete(current_level)
+	_show_completed_badge()
 	if result != OK:
 		_show_toast("Progress could not be saved: " + error_string(result))
 	var token := transition_id
 	var tint := store.get_color(current_level)
 	var layer := Control.new()
+	layer.theme = palette_theme
 	layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	layer.mouse_filter = Control.MOUSE_FILTER_STOP
 	add_child(layer)
@@ -669,7 +1063,7 @@ func _complete_level() -> void:
 		tween.tween_property(spark, "modulate:a", 0.0, 1.4).set_delay(0.3)
 	await get_tree().create_timer(2.5).timeout
 	if token == transition_id and screen == "play":
-		play_level(current_level + 1)
+		_open_adjacent_uncompleted(1)
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and menu_drag_source > 0:
@@ -698,8 +1092,8 @@ func _input(event: InputEvent) -> void:
 	var rearrange_chord: bool = screen == "menu" and event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_U) and only_rearrange_keys
 	var previous_chord: bool = (screen == "play" or screen == "editor") and not color_mode and event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_LEFT) and _only_keys([KEY_SHIFT, KEY_Z, KEY_LEFT])
 	var next_chord: bool = (screen == "play" or screen == "editor") and not color_mode and event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_RIGHT) and _only_keys([KEY_SHIFT, KEY_Z, KEY_RIGHT])
-	var unlock_chord: bool = event.ctrl_pressed and not event.shift_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_M) and _only_keys([KEY_CTRL, KEY_Z, KEY_M])
-	var reset_chord: bool = event.ctrl_pressed and not event.shift_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_N) and _only_keys([KEY_CTRL, KEY_Z, KEY_N])
+	var unlock_chord: bool = event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_M) and _only_keys([KEY_SHIFT, KEY_Z, KEY_M])
+	var reset_chord: bool = event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not event.meta_pressed and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_N) and _only_keys([KEY_SHIFT, KEY_Z, KEY_N])
 	if (editor_chord or color_chord or rearrange_chord or previous_chord or next_chord or unlock_chord or reset_chord) and event.pressed and not chord_active:
 		chord_active = true
 		pending_undo = false
@@ -753,7 +1147,7 @@ func _input(event: InputEvent) -> void:
 func _navigate_level(step: int) -> void:
 	if screen == "play":
 		if current_level + step >= 1:
-			play_level(current_level + step)
+			play_level(current_level + step, [], step)
 	elif screen == "editor":
 		var next := editor_level + step
 		if next < 1 or next > 100000:
@@ -763,13 +1157,13 @@ func _navigate_level(step: int) -> void:
 		_select_editor_level(float(next))
 
 func _return_to_menu() -> void:
+	pending_menu_level = 0
 	if screen == "menu" and not rearrange_mode and not color_mode:
 		return
 	rearrange_mode = false
 	color_mode = false
 	editor_playtesting = false
 	menu_hovered_level = 0
-	menu_page = 0
 	return_screen = "menu"
 	pending_undo = false
 	chord_active = false
@@ -780,7 +1174,6 @@ func _change_completion(unlock: bool) -> void:
 	if result != OK:
 		_show_toast("Progress could not be saved: " + error_string(result))
 		return
-	menu_page = 0
 	menu_hovered_level = 0
 	show_menu()
 
@@ -1236,6 +1629,7 @@ func _toggle_color_editor() -> void:
 	color_level = editor_level if screen == "editor" else (current_level if screen == "play" else (menu_hovered_level if menu_hovered_level > 0 else store.frontier()))
 	color_selecting_line = false
 	overlay = Control.new()
+	overlay.theme = palette_theme
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(overlay)
 	var veil := ColorRect.new()
@@ -1385,12 +1779,14 @@ func _show_toast(message: String) -> void:
 	if is_instance_valid(toast):
 		toast.queue_free()
 	toast = label(message, 14, ACCENT)
+	toast.theme = palette_theme
 	toast.position = Vector2(44, 8)
 	toast.z_index = 100
 	add_child(toast)
 	toast_timer = 5.0
 
 func _process(delta: float) -> void:
+	_process_menu_thumbnails()
 	if toast_timer > 0:
 		toast_timer -= delta
 		if toast_timer <= 0 and is_instance_valid(toast):

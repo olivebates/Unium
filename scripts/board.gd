@@ -6,6 +6,7 @@ const SPLIT_UI_OFFSET := 5.0 * HUE_STEP
 const WARM_ANCHOR_HUE := 35.0 / 360.0
 const LINE_HUE_SHIFT := 2.0 * HUE_STEP
 const MOVE_DURATION := 0.2
+const TileCanvas = preload("res://scripts/board_tiles.gd")
 
 signal path_changed
 signal solved
@@ -31,14 +32,27 @@ var line_shadow: Line2D
 var line: Line2D
 var start_dot_shadow: Polygon2D
 var start_dot: Polygon2D
+var show_start_finish := false
+var start_label: Label
+var finish_label: Label
 var thumbnail_mode := false
 var line_tween: Tween
 var tile_tweens: Dictionary = {}
 var tile_visuals: Array[Color] = []
+var tile_canvas: Node2D
+var tile_rects: Array[Rect2] = []
+var tile_styles: Array[StyleBoxFlat] = []
+var animated_tile_styles: Dictionary = {}
+var rendered_values: Array = []
+var tile_hover_style: StyleBoxFlat
+var tile_style_key: Array = []
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	tile_canvas = TileCanvas.new()
+	tile_canvas.paint = _draw_tiles
+	add_child(tile_canvas)
 	line_group = CanvasGroup.new()
 	line_group.modulate = Color.WHITE
 	add_child(line_group)
@@ -64,9 +78,28 @@ func _ready() -> void:
 	start_dot = Polygon2D.new()
 	start_dot.color = line_color(tint)
 	line_group.add_child(start_dot)
+	start_label = _tutorial_label("Drag")
+	finish_label = _tutorial_label("")
 	resized.connect(refresh)
-	mouse_exited.connect(func(): hovered = -1; queue_redraw())
+	mouse_exited.connect(func():
+		if hovered != -1:
+			hovered = -1
+			_redraw_tiles()
+	)
 	set_process_input(true)
+
+func _tutorial_label(value: String) -> Label:
+	var node := Label.new()
+	node.text = value
+	node.visible = false
+	node.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	node.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	node.add_theme_color_override("font_color", Color.WHITE)
+	node.add_theme_color_override("font_outline_color", Color.BLACK)
+	node.add_theme_constant_override("outline_size", 4)
+	add_child(node)
+	return node
 
 func configure(level: Dictionary, color: Color, line_override: Color = Color.TRANSPARENT) -> void:
 	width = int(level.width)
@@ -98,13 +131,17 @@ func cell_at(point: Vector2) -> int:
 	return int(local.y) * width + int(local.x)
 
 func refresh(animate: bool = false) -> void:
+	_update_tutorial_labels()
 	var values := Puzzle.resolved_tiles(tiles, path)
-	var palette := [tile_color(0, tint), tile_color(1, tint), tile_color(2, tint)]
+	rendered_values = values
+	_prepare_tile_styles()
+	var palette := [tile_styles[0].bg_color, tile_styles[1].bg_color, tile_styles[2].bg_color] if not tile_styles.is_empty() else [tile_color(0, tint), tile_color(1, tint), tile_color(2, tint)]
 	if not animate or tile_visuals.size() != values.size():
 		for tween in tile_tweens.values():
 			if tween and tween.is_running():
 				tween.kill()
 		tile_tweens.clear()
+		animated_tile_styles.clear()
 		tile_visuals.resize(values.size())
 		for cell in range(values.size()):
 			tile_visuals[cell] = palette[values[cell]]
@@ -116,9 +153,10 @@ func refresh(animate: bool = false) -> void:
 			if tile_tweens.has(cell) and tile_tweens[cell].is_running():
 				tile_tweens[cell].kill()
 			var tween := create_tween()
+			_update_animated_tile_style(cell)
 			tween.tween_method(Callable(self, "_set_tile_visual").bind(cell), tile_visuals[cell], target, MOVE_DURATION).set_trans(Tween.TRANS_SINE)
 			tile_tweens[cell] = tween
-	queue_redraw()
+	_redraw_tiles()
 	if line == null:
 		return
 	var points := PackedVector2Array()
@@ -134,6 +172,29 @@ func refresh(animate: bool = false) -> void:
 		_animate_line_along_path(line.points, points)
 	else:
 		_set_visual_line(points)
+
+func _update_tutorial_labels() -> void:
+	if not is_instance_valid(start_label) or not is_instance_valid(finish_label):
+		return
+	start_label.visible = false
+	finish_label.visible = false
+	if not show_start_finish or tiles.is_empty():
+		return
+	var first := -1
+	for cell in range(tiles.size()):
+		if tiles[cell] != 1:
+			continue
+		var x := cell % width
+		if first < 0 or x < first % width:
+			first = cell
+	if first < 0:
+		return
+	var label_size: Vector2 = Vector2.ONE * float(geometry().cell)
+	var font_size := clampi(int(label_size.x * 0.22), 10, 24)
+	start_label.add_theme_font_size_override("font_size", font_size)
+	start_label.size = label_size
+	start_label.position = center(first) - label_size * 0.5
+	start_label.visible = true
 
 func _animate_line_along_path(initial: PackedVector2Array, target: PackedVector2Array) -> void:
 	if target.is_empty():
@@ -203,7 +264,8 @@ func _clip_polyline(points: PackedVector2Array, distance: float) -> PackedVector
 
 func _set_tile_visual(color: Color, cell: int) -> void:
 	tile_visuals[cell] = color
-	queue_redraw()
+	_update_animated_tile_style(cell)
+	_redraw_tiles()
 
 func _set_visual_line(points: PackedVector2Array) -> void:
 	line.points = points
@@ -217,31 +279,67 @@ func _set_visual_line(points: PackedVector2Array) -> void:
 		start_dot.polygon = polygon
 		start_dot_shadow.polygon = polygon
 
-func _draw() -> void:
-	if tiles.is_empty():
+func _redraw_tiles() -> void:
+	if is_instance_valid(tile_canvas):
+		tile_canvas.queue_redraw()
+
+func _prepare_tile_styles() -> void:
+	var key := [size, width, height, tiles.size(), tint]
+	if key == tile_style_key:
 		return
-	if thumbnail_mode:
-		draw_rect(Rect2(Vector2.ZERO, size), background_color(tint))
+	tile_style_key = key
+	tile_rects.clear()
+	tile_styles.clear()
+	animated_tile_styles.clear()
 	var g := geometry()
-	var values := Puzzle.resolved_tiles(tiles, path)
-	var gap: float = clampf(g.cell * 0.085, 3, 8)
+	if g.cell <= 0.0:
+		return
+	var gap: float = minf(g.cell * 0.5, clampf(g.cell * 0.085, 3, 8))
 	for cell in range(tiles.size()):
 		var point: Vector2 = g.origin + Vector2(Puzzle.cell_vector(cell, width)) * g.cell
-		var rect := Rect2(point + Vector2.ONE * gap * 0.5, Vector2.ONE * (g.cell - gap))
-		var color: Color = tile_visuals[cell] if tile_visuals.size() == values.size() else tile_color(values[cell], tint)
+		tile_rects.append(Rect2(point + Vector2.ONE * gap * 0.5, Vector2.ONE * (g.cell - gap)))
+	for value in range(3):
 		var style := StyleBoxFlat.new()
-		style.bg_color = color
+		style.bg_color = tile_color(value, tint)
 		style.set_corner_radius_all(maxi(3, int(g.cell * 0.12)))
 		style.shadow_color = Color(0, 0, 0, 0.2)
 		style.shadow_size = 3
 		style.shadow_offset = Vector2(0, 3)
-		if values[cell] == 1:
+		if value == 1:
 			style.set_border_width_all(1)
-			style.border_color = color.darkened(0.25)
-		if hovered == cell and not locked:
-			style.set_border_width_all(2)
-			style.border_color = Color.BLACK
-		draw_style_box(style, rect)
+			style.border_color = style.bg_color.darkened(0.25)
+		tile_styles.append(style)
+	tile_hover_style = StyleBoxFlat.new()
+	tile_hover_style.draw_center = false
+	tile_hover_style.set_corner_radius_all(maxi(3, int(g.cell * 0.12)))
+	tile_hover_style.set_border_width_all(2)
+	tile_hover_style.border_color = Color.BLACK
+
+func _update_animated_tile_style(cell: int) -> void:
+	if tile_styles.is_empty() or cell >= rendered_values.size():
+		return
+	var base := tile_styles[int(rendered_values[cell])]
+	var color := tile_visuals[cell]
+	if color.is_equal_approx(base.bg_color):
+		animated_tile_styles.erase(cell)
+		return
+	if not animated_tile_styles.has(cell):
+		animated_tile_styles[cell] = base.duplicate()
+	var style: StyleBoxFlat = animated_tile_styles[cell]
+	style.bg_color = color
+	style.set_border_width_all(1 if rendered_values[cell] == 1 else 0)
+	style.border_color = color.darkened(0.25)
+
+func _draw_tiles(canvas: CanvasItem) -> void:
+	if tile_styles.is_empty() or tile_rects.size() != rendered_values.size():
+		return
+	if thumbnail_mode:
+		canvas.draw_rect(Rect2(Vector2.ZERO, size), background_color(tint))
+	for cell in range(tile_rects.size()):
+		var style: StyleBoxFlat = animated_tile_styles.get(cell, tile_styles[int(rendered_values[cell])])
+		canvas.draw_style_box(style, tile_rects[cell])
+	if hovered >= 0 and hovered < tile_rects.size() and not locked:
+		canvas.draw_style_box(tile_hover_style, tile_rects[hovered])
 
 static func line_color(color: Color) -> Color:
 	var toward_warm := fposmod(WARM_ANCHOR_HUE - color.h + 0.5, 1.0) - 0.5
@@ -314,8 +412,10 @@ func _gui_input(event: InputEvent) -> void:
 		else:
 			_end()
 	if event is InputEventMouseMotion:
-		hovered = cell_at(event.position)
-		queue_redraw()
+		var next_hovered := cell_at(event.position)
+		if next_hovered != hovered:
+			hovered = next_hovered
+			_redraw_tiles()
 		if dragging or right_dragging:
 			_trace(event.position)
 		previous_pointer = event.position
