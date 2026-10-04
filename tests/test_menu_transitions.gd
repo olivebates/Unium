@@ -125,7 +125,8 @@ func run() -> void:
 	await create_timer(0.3).timeout
 	var completed_card: Button = main.menu_cards[4]
 	var completed_outline: Panel = completed_card.get_children().filter(func(node): return node is Panel)[0]
-	check((completed_outline.get_theme_stylebox("panel") as StyleBoxFlat).border_color == main.NO_SOLUTION_OUTLINE and (completed_card.get_child(0) as TextureRect).modulate == Color.WHITE, "Changed completion retains the red unknown-solution outline and puzzle preview colors")
+	var expected_outline: Color = main.COMPLETED_CARD_OUTLINE if "--generated" in OS.get_cmdline_user_args() else main.NO_SOLUTION_OUTLINE
+	check((completed_outline.get_theme_stylebox("panel") as StyleBoxFlat).border_color == expected_outline and (completed_card.get_child(0) as TextureRect).modulate == Color.WHITE, "Changed completion uses the known-solution status and retains puzzle preview colors")
 	main.store.unlocked_through = 110
 	main.store.levels.erase("106")
 	main.store.cache.erase(106)

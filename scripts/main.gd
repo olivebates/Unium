@@ -28,7 +28,6 @@ var completed_badge: Control
 var credit_display: HBoxContainer
 var credit_label: Label
 var hint_button: Button
-var hint_row: HBoxContainer
 var hint_stage := 0
 var hint_busy := false
 var hint_endpoints: Array[int] = []
@@ -102,7 +101,7 @@ var height_input: SpinBox
 var move_input: SpinBox
 var editor_generation_moves := -1
 var crossover_input: SpinBox
-var editor_required_crossings := Puzzle.MAX_GENERATED_CROSSINGS
+var editor_required_crossings := Puzzle.DEFAULT_EDITOR_CROSSINGS
 var editor_number_input: SpinBox
 var brush_buttons: Array[Button] = []
 var restoring_editor := false
@@ -500,7 +499,6 @@ func _shell(restore_menu: bool = false) -> void:
 	credit_display = null
 	credit_label = null
 	hint_button = null
-	hint_row = null
 	hint_stage = 0
 	hint_busy = false
 	hint_endpoints.clear()
@@ -1002,12 +1000,9 @@ func play_level(number: int, restore: Array = [], navigation_direction: int = 0)
 	board.refresh()
 	board.solved.connect(_complete_level)
 	var controls := HBoxContainer.new()
+	controls.add_theme_constant_override("separation", 4)
 	content.add_child(controls)
 	controls.add_child(button("▦ All puzzles", show_menu))
-	spacer(controls)
-	controls.add_child(button("← Previous puzzle", func(): _open_adjacent_level(-1)))
-	controls.add_child(button("↻ Reset line", func(): board.clear_path()))
-	controls.add_child(button("Next puzzle →", func(): _open_adjacent_level(1)))
 	if number != 1:
 		hint_endpoints = store.hint_endpoints(number)
 		hint_stage = store.hint_stage(number)
@@ -1016,15 +1011,17 @@ func play_level(number: int, restore: Array = [], navigation_direction: int = 0)
 				board.show_solution_hint(hint_endpoints[0], true)
 			if hint_stage >= 2:
 				board.show_solution_hint(hint_endpoints[1], false)
-		hint_row = HBoxContainer.new()
-		content.add_child(hint_row)
-		spacer(hint_row)
 		hint_button = button("", _use_hint, true)
 		hint_button.focus_mode = Control.FOCUS_NONE
-		hint_button.custom_minimum_size.x = 165
-		hint_row.add_child(hint_button)
-		spacer(hint_row)
+		hint_button.icon = CoinIcon.TEXTURE
+		hint_button.icon_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		hint_button.add_theme_constant_override("icon_max_width", 22)
+		controls.add_child(hint_button)
 		_update_hint_button()
+	spacer(controls)
+	controls.add_child(button("← Previous puzzle", func(): _open_adjacent_level(-1)))
+	controls.add_child(button("↻ Reset line", func(): board.clear_path()))
+	controls.add_child(button("Skip →", func(): _open_adjacent_level(1)))
 	if changing_set or not previous_background.is_equal_approx(PuzzleBoard.background_color(tint)):
 		_animate_level_background(previous_background, PuzzleBoard.background_color(tint), fade_duration)
 	if not outgoing and (changing_set or not previous_text.is_equal_approx(PuzzleBoard.text_color(tint))):
@@ -1086,14 +1083,16 @@ func _update_credits_display() -> void:
 func _update_hint_button() -> void:
 	if not is_instance_valid(hint_button):
 		return
-	hint_row.visible = hint_stage < 2
-	hint_button.text = "Hint (-1 coin)"
-	hint_button.disabled = hint_busy or store.credits <= 0 or hint_endpoints.size() != 2
+	hint_button.visible = hint_stage < 2
+	var cost := store.hint_cost(current_level)
+	hint_button.text = "Hint -%d" % cost
+	hint_button.tooltip_text = "Reveal the %s (%d coin%s)." % ["start" if hint_stage == 0 else "finish", cost, "s" if cost != 1 else ""]
+	hint_button.disabled = hint_busy or store.credits < cost or hint_endpoints.size() != 2
 
 func _use_hint() -> void:
 	if screen != "play" or hint_busy or hint_stage >= 2:
 		return
-	if store.credits <= 0 or hint_endpoints.size() != 2:
+	if store.credits < store.hint_cost(current_level) or hint_endpoints.size() != 2:
 		return
 	var result := store.purchase_hint(current_level)
 	if result != OK:
@@ -1459,6 +1458,10 @@ func _show_editor() -> void:
 	controls.add_child(crossover_input)
 	crossover_input.value_changed.connect(func(value: float): editor_required_crossings = int(value))
 	controls.add_child(button("Generate random level", _generate_editor_level))
+	var gray_suggestion := button("Suggest gray tiles", _suggest_editor_gray_tiles)
+	gray_suggestion.tooltip_text = "Apply a small gray bridge, junction, or crossover. Ctrl + Z undoes the placement."
+	gray_suggestion.focus_mode = Control.FOCUS_NONE
+	controls.add_child(gray_suggestion)
 	controls.add_child(label("PAINT TILES", 12, MUTED))
 	brush_buttons.clear()
 	for value in range(3):
@@ -1495,14 +1498,18 @@ func _solve_editor() -> void:
 	editor_solve_button.text = "Cancel solve"
 	editor_solve_button.disabled = false
 	var token := transition_id
-	var search := PuzzleSolver.new(editor_data)
+	var layout := editor_data.duplicate(true)
+	if not layout.get("solution") is Array:
+		var saved := store.get_level(editor_level)
+		if saved.width == layout.width and saved.height == layout.height and saved.tiles == layout.tiles and saved.get("solution") is Array:
+			layout["solution"] = saved.solution.duplicate()
+	var search := PuzzleSolver.new(layout)
 	editor_solver = search
 	# Let the status and Cancel button draw before exploring routes.
 	await get_tree().process_frame
 	if token != transition_id or screen != "editor" or editor_solver != search:
 		return
 	var started := Time.get_ticks_msec()
-	var next_update := started
 	while editor_solver == search and token == transition_id and screen == "editor":
 		search.advance()
 		if search.status == "solved":
@@ -1512,15 +1519,15 @@ func _solve_editor() -> void:
 			board.path = search.solution.duplicate()
 			board.refresh(true)
 			_editor_playtest_solved()
+			editor_message.text += " Line length: %d tiles." % board.path.size()
 			return
 		if search.status == "unsolvable":
 			_toggle_editor_playtest()
 			editor_message.text = "No legal solution exists for this layout."
 			return
-		var now := Time.get_ticks_msec()
-		if now >= next_update:
-			editor_message.text = "Searching… %s paths checked (%ds).\nCancel to keep editing." % [search.nodes, (now - started) / 1000]
-			next_update = now + 200
+		board.path = search.last_checked_path.duplicate()
+		board.refresh()
+		editor_message.text = "Searching… %s paths checked (%ds).\nLast path: %d tiles.\nCancel to keep editing." % [search.nodes, (Time.get_ticks_msec() - started) / 1000, board.path.size()]
 		await get_tree().process_frame
 
 func _toggle_editor_playtest() -> void:
@@ -1586,6 +1593,7 @@ func _reset_all_white() -> void:
 		editor_message.text = "The board is already all white."
 		return
 	_record_edit()
+	_forget_editor_solution()
 	editor_data.tiles.fill(0)
 	board.tiles = editor_data.tiles.duplicate()
 	board.refresh()
@@ -1610,16 +1618,46 @@ func _generate_editor_level() -> void:
 	if generated.is_empty():
 		editor_message.text = "No line found with %d moves and exactly %d crossovers. Try again or change settings." % [moves, editor_required_crossings]
 		return
-	var layout := {"width": int(generated.width), "height": int(generated.height), "tiles": generated.tiles.duplicate()}
-	if editor_data != layout:
-		_record_edit()
-		editor_data = layout
-		_sync_editor()
+	var before := _structural_snapshot()
+	var result := store.record_editor_solution(editor_level, generated, generated.solution)
+	if result != OK:
+		editor_message.text = "Generated puzzle could not be saved: " + error_string(result)
+		return
+	undo_stack.append(before)
+	redo_stack.clear()
+	editor_data = store.get_level(editor_level)
+	if editor_level == current_level:
+		saved_path.clear()
+	_sync_editor()
 	var unique_cells: Dictionary = {}
 	for cell in generated.solution:
 		unique_cells[cell] = true
 	var used: int = generated.solution.size() - unique_cells.size()
-	editor_message.text = "Generated %d moves with exactly %d crossovers. Save to keep it." % [moves, used]
+	editor_message.text = "Generated and saved %d moves with exactly %d crossovers, including the solution." % [moves, used]
+
+func _suggest_editor_gray_tiles() -> void:
+	if screen != "editor" or editor_playtesting or color_mode:
+		return
+	board._end()
+	board._end_light()
+	_finish_stroke()
+	var layout := editor_data.duplicate(true)
+	if not layout.has("solution"):
+		var saved := store.get_level(editor_level)
+		if saved.width == layout.width and saved.height == layout.height and saved.tiles == layout.tiles:
+			for field in ["solution", "solution_start", "solution_end"]:
+				if saved.has(field):
+					layout[field] = saved[field]
+	var suggestion := Puzzle.suggest_gray_tiles(layout)
+	if suggestion.is_empty():
+		editor_message.text = "No useful gray placement found. Try a layout with light gaps between dark groups."
+		return
+	_record_edit()
+	_forget_editor_solution()
+	for cell in suggestion.cells:
+		editor_data.tiles[cell] = 2
+	_sync_editor()
+	editor_message.text = "Added %d gray tile%s for %s. Ctrl + Z to undo; Save level to keep it." % [suggestion.cells.size(), "" if suggestion.cells.size() == 1 else "s", suggestion.reason]
 
 func _copy_editor_layout() -> void:
 	board._end()
@@ -1662,6 +1700,11 @@ func _record_edit() -> void:
 		undo_stack.pop_front()
 	redo_stack.clear()
 
+func _forget_editor_solution() -> void:
+	editor_data.erase("solution")
+	editor_data.erase("solution_start")
+	editor_data.erase("solution_end")
+
 func _shift_editor_tiles(direction: Vector2i) -> void:
 	if screen != "editor" or color_mode or editor_playtesting:
 		return
@@ -1680,6 +1723,7 @@ func _shift_editor_tiles(direction: Vector2i) -> void:
 	if shifted == editor_data.tiles:
 		return
 	_record_edit()
+	_forget_editor_solution()
 	editor_data.tiles = shifted
 	_sync_editor()
 	editor_message.text = "Shifted all tiles one space. Save level to keep it."
@@ -1693,6 +1737,7 @@ func _paint_light_cell(cell: int) -> void:
 func _paint_value(cell: int, value: int) -> void:
 	if editor_data.tiles[cell] == value:
 		return
+	_forget_editor_solution()
 	editor_data.tiles[cell] = value
 	board.tiles[cell] = value
 	board.refresh()

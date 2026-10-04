@@ -56,14 +56,7 @@ func _load_levels(path: String) -> void:
 		for key in data.levels:
 			if str(key).is_valid_int() and int(key) > 0 and valid_level(data.levels[key]):
 				var value: Dictionary = data.levels[key]
-				var normalized: Array = []
-				for tile in value.tiles:
-					normalized.append(int(tile))
-				var layout := {"width": int(value.width), "height": int(value.height), "tiles": normalized}
-				if _valid_solution_endpoints(value):
-					layout["solution_start"] = int(value.solution_start)
-					layout["solution_end"] = int(value.solution_end)
-				levels[str(key)] = layout
+				levels[str(key)] = _stored_layout(value)
 	if data.get("colors") is Dictionary:
 		var identifiers: Array[int] = []
 		for key in data.colors:
@@ -109,6 +102,33 @@ static func _valid_solution_endpoints(value: Dictionary) -> bool:
 	if not (first is int or first is float) or not (last is int or last is float):
 		return false
 	return int(first) == first and int(last) == last and int(first) >= 0 and int(last) >= 0 and int(first) < value.tiles.size() and int(last) < value.tiles.size()
+
+static func _valid_solution_path(value: Dictionary, source: Variant) -> Array[int]:
+	var path: Array[int] = []
+	if not source is Array or source.size() < 2 or source.size() > value.tiles.size() * 2:
+		return path
+	var visited: Array = []
+	for raw in source:
+		if not (raw is int or raw is float) or int(raw) != raw or not Puzzle.can_append(visited, int(raw), int(value.width), int(value.height)):
+			return []
+		visited.append(int(raw))
+		path.append(int(raw))
+	return path if Puzzle.is_complete(value.tiles, visited) else []
+
+static func _stored_layout(value: Dictionary) -> Dictionary:
+	var normalized: Array = []
+	for tile in value.tiles:
+		normalized.append(int(tile))
+	var layout := {"width": int(value.width), "height": int(value.height), "tiles": normalized}
+	var solution := _valid_solution_path(layout, value.get("solution"))
+	if not solution.is_empty():
+		layout["solution"] = solution
+		layout["solution_start"] = solution.front()
+		layout["solution_end"] = solution.back()
+	elif _valid_solution_endpoints(value):
+		layout["solution_start"] = int(value.solution_start)
+		layout["solution_end"] = int(value.solution_end)
+	return layout
 
 func get_level(number: int) -> Dictionary:
 	var key := str(number)
@@ -195,16 +215,20 @@ func spend_credit() -> Error:
 func hint_stage(number: int) -> int:
 	return int(hints.get(str(number), 0))
 
+func hint_cost(number: int) -> int:
+	return 2 if hint_stage(number) == 0 else 1
+
 func purchase_hint(number: int) -> Error:
-	if number < 1 or credits <= 0 or hint_stage(number) >= 2:
+	var cost := hint_cost(number)
+	if number < 1 or credits < cost or hint_stage(number) >= 2:
 		return ERR_UNAVAILABLE
 	var key := str(number)
 	var previous := hint_stage(number)
-	credits -= 1
+	credits -= cost
 	hints[key] = previous + 1
 	var result := save_progress()
 	if result != OK:
-		credits += 1
+		credits += cost
 		if previous == 0:
 			hints.erase(key)
 		else:
@@ -241,13 +265,16 @@ func save_progress() -> Error:
 func save_level(number: int, value: Dictionary) -> Error:
 	if number < 1 or not valid_level(value):
 		return ERR_INVALID_DATA
-	levels[str(number)] = {"width": int(value.width), "height": int(value.height), "tiles": value.tiles.duplicate()}
+	levels[str(number)] = _stored_layout(value)
 	return save_levels()
 
 func record_editor_solution(number: int, value: Dictionary, path: Array) -> Error:
-	if number < 1 or not valid_level(value) or path.is_empty() or not Puzzle.is_complete(value.tiles, path):
+	if number < 1 or not valid_level(value):
 		return ERR_INVALID_DATA
-	var layout := {"width": int(value.width), "height": int(value.height), "tiles": value.tiles.duplicate(), "solution_start": int(path.front()), "solution_end": int(path.back())}
+	var solution := _valid_solution_path(value, path)
+	if solution.is_empty():
+		return ERR_INVALID_DATA
+	var layout := {"width": int(value.width), "height": int(value.height), "tiles": value.tiles.duplicate(), "solution": solution, "solution_start": solution.front(), "solution_end": solution.back()}
 	var key := str(number)
 	var previous: Variant = levels.get(key)
 	levels[key] = layout
@@ -269,7 +296,7 @@ func insert_level(number: int, value: Dictionary) -> Error:
 	for key in levels:
 		var index := int(key)
 		shifted_levels[str(index + 1 if index >= number else index)] = levels[key]
-	shifted_levels[str(number)] = {"width": int(value.width), "height": int(value.height), "tiles": value.tiles.duplicate()}
+	shifted_levels[str(number)] = _stored_layout(value)
 	var shifted_completed := {}
 	for key in completed:
 		var index := int(key)
@@ -359,12 +386,7 @@ func rearrange_level(source: int, target: int, action: String, after: bool = fal
 	for offset in range(layouts.size()):
 		var number := first + offset
 		var layout := layouts[offset]
-		var stored := {"width": layout.width, "height": layout.height, "tiles": layout.tiles.duplicate()}
-		var endpoints := _endpoints_from_layout(layout)
-		if not endpoints.is_empty():
-			stored["solution_start"] = endpoints[0]
-			stored["solution_end"] = endpoints[1]
-		levels[str(number)] = stored
+		levels[str(number)] = _stored_layout(layout)
 		if progress[offset]:
 			completed[str(number)] = true
 		else:

@@ -17,6 +17,11 @@ func check(condition: bool, message: String) -> void:
 func run() -> void:
 	var started := Time.get_ticks_msec()
 	var generated_crossings := 0
+	var generated_layouts: Dictionary = {}
+	var generated_lengths: Dictionary = {}
+	var generated_crossing_counts: Dictionary = {}
+	var source_widths: Dictionary = {}
+	var source_heights: Dictionary = {}
 	for number in range(1, 151):
 		var level := Puzzle.generate(number)
 		var unique_cells: Dictionary = {}
@@ -24,41 +29,60 @@ func run() -> void:
 			unique_cells[cell] = true
 		var crossing_count: int = level.solution.size() - unique_cells.size()
 		generated_crossings += crossing_count
-		check(crossing_count <= Puzzle.MAX_GENERATED_CROSSINGS, "Generated solution has at most three crossings in %d" % number)
+		check(crossing_count >= 7 and crossing_count <= 10, "Generated solution has 7–10 crossings in %d" % number)
 		check(level == Puzzle.generate(number), "Seed %d is deterministic" % number)
-		check(level.solution.size() == number + 26, "Exact solution length for %d" % number)
-		check(level.width >= 3 and level.height >= 3, "Minimum dimensions")
-		if number <= 23:
-			check(level.width <= 7 and level.height <= 7, "Original board size range")
-		else:
-			check(level.width > 7 or level.height > 7, "Larger boards preserve growing solutions")
+		check(level.solution.size() >= 50 and level.solution.size() <= 80 and level.moves == level.solution.size(), "Generated solution has 50–80 moves for %d" % number)
+		check(level.source_width >= 12 and level.source_width <= 15 and level.source_height >= 12 and level.source_height <= 15, "The initial canvas has independently chosen 12–15 tile sides")
+		check(level.width <= level.source_width + 2 and level.height <= level.source_height + 2, "Cropping and padding respect the initial canvas bounds")
+		generated_layouts[str([level.width, level.height, level.tiles])] = true
+		generated_lengths[level.moves] = true
+		generated_crossing_counts[crossing_count] = true
+		source_widths[level.source_width] = true
+		source_heights[level.source_height] = true
+		var used_min := Vector2i(level.width, level.height)
+		var used_max := Vector2i.ZERO
+		for cell in level.solution:
+			var position := Puzzle.cell_vector(cell, level.width)
+			used_min = used_min.min(position)
+			used_max = used_max.max(position)
+		check(used_min == Vector2i.ONE and used_max == Vector2i(level.width - 2, level.height - 2), "The solution is tightly cropped before one tile of padding is added")
+		for cell in range(level.tiles.size()):
+			var position := Puzzle.cell_vector(cell, level.width)
+			if position.x == 0 or position.y == 0 or position.x == level.width - 1 or position.y == level.height - 1:
+				check(level.tiles[cell] == 0 and not level.solution.has(cell), "A light border surrounds the cropped solution")
 		check(level.tiles.has(1), "Puzzle starts unsolved")
+		check(not level.tiles.has(2), "Generated level %d contains no gray tiles" % number)
 		var path: Array = []
 		for cell in level.solution:
 			check(Puzzle.can_append(path, cell, level.width, level.height), "Legal generated move in %d" % number)
 			path.append(cell)
 		check(Puzzle.is_complete(level.tiles, path), "Generated solution solves %d" % number)
-		var unseen: Array = []
-		for cell in range(level.tiles.size()):
-			if level.tiles[cell] == 2:
-				unseen.append(cell)
-		check(not unseen.is_empty(), "Gray clumps exist in %d" % number)
-		while not unseen.is_empty():
-			var component: Array = [unseen.pop_back()]
-			var cursor := 0
-			var touches := false
-			while cursor < component.size():
-				for near in Puzzle.neighbors(component[cursor], level.width, level.height):
-					if level.tiles[near] == 1:
-						touches = true
-					if near in unseen:
-						unseen.erase(near)
-						component.append(near)
-				cursor += 1
-			check(component.size() >= 2 and component.size() <= 4, "Gray component size 2–4")
-			check(touches, "Gray component touches a dark tile")
+		var gray_suggestion := Puzzle.suggest_gray_tiles(level)
+		if not gray_suggestion.is_empty():
+			var with_gray: Array = level.tiles.duplicate()
+			check(gray_suggestion.cells.size() <= 2, "Gray suggestions stay small")
+			for cell in gray_suggestion.cells:
+				check(with_gray[cell] == 0 and cell != path.front() and cell != path.back(), "Gray suggestions preserve dark targets and solution endpoints")
+				with_gray[cell] = 2
+			check(Puzzle.is_complete(with_gray, path), "Gray suggestion preserves the solution for %d" % number)
 	check(generated_crossings > 0, "Generated paths use legal self-crossings")
+	check(generated_layouts.size() > 100, "Automatic seeds produce varied layouts")
+	check(source_widths.size() == 4 and source_heights.size() == 4, "Initial sizes span 12 through 15 on both axes")
+	check(generated_lengths.has(50) and generated_lengths.has(80) and generated_lengths.size() > 20, "Generated move counts vary across the requested range")
+	check(generated_crossing_counts.size() == 4, "Generated solutions use all crossover counts from seven to ten")
 	print("Generated crossings across 150 levels: %d" % generated_crossings)
+	var gray_bridge := {"width": 3, "height": 3, "tiles": [0, 0, 0, 1, 0, 1, 0, 0, 0]}
+	check(Puzzle.suggest_gray_tiles(gray_bridge).get("cells", []) == [4], "Suggest a single light gap connecting two dark islands")
+	var gray_pair := {"width": 4, "height": 3, "tiles": [0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0]}
+	check(Puzzle.suggest_gray_tiles(gray_pair).get("cells", []) == [5, 6], "Suggest a connected pair when a bridge needs two tiles")
+	var gray_junction := {"width": 3, "height": 3, "tiles": [0, 1, 1, 1, 0, 1, 1, 1, 1]}
+	check(Puzzle.suggest_gray_tiles(gray_junction).get("cells", []) == [4], "Suggest a junction inside one connected dark group")
+	gray_bridge.tiles[4] = 2
+	check(Puzzle.suggest_gray_tiles(gray_bridge).is_empty(), "Further suggestions do not grow a gray patch")
+	gray_bridge.tiles.fill(0)
+	check(Puzzle.suggest_gray_tiles(gray_bridge).is_empty(), "An empty board has no useful gray suggestion")
+	gray_bridge.tiles.fill(1)
+	check(Puzzle.suggest_gray_tiles(gray_bridge).is_empty(), "Suggestions never remove dark targets")
 	for settings in [[Vector2i(3, 3), 0, 41], [Vector2i(5, 6), 2, 42], [Vector2i(7, 7), 8, 43]]:
 		var dimensions: Vector2i = settings[0]
 		var limit: int = settings[1]
@@ -66,6 +90,7 @@ func run() -> void:
 		var custom := Puzzle.generate(1, dimensions, limit, seed)
 		check(custom == Puzzle.generate(1, dimensions, limit, seed), "Editor generation is repeatable with a seed")
 		check(custom.width == dimensions.x and custom.height == dimensions.y and custom.solution.size() <= dimensions.x * dimensions.y, "Editor generation respects the selected dimensions")
+		check(not custom.tiles.has(2), "Editor generated level contains no gray tiles")
 		var custom_path: Array = []
 		var visited: Dictionary = {}
 		for cell in custom.solution:
@@ -78,7 +103,7 @@ func run() -> void:
 	var generous_unique: Dictionary = {}
 	for cell in generous.solution:
 		generous_unique[cell] = true
-	check(generous.solution.size() - generous_unique.size() > Puzzle.MAX_GENERATED_CROSSINGS, "Editor setting can allow more crossings than normal levels")
+	check(generous.solution.size() - generous_unique.size() > Puzzle.DEFAULT_EDITOR_CROSSINGS, "Editor setting can allow more crossings than its default")
 	var exact := Puzzle.generate(1, Vector2i(3, 3), 0, 41, 7)
 	check(exact.solution.size() == 7 and Puzzle.is_complete(exact.tiles, exact.solution), "Editor move count sets the exact solution length")
 	check(Puzzle.generate(1, Vector2i(3, 3), 0, 41, 10).is_empty(), "Impossible move counts fail without producing a shorter puzzle")
@@ -95,8 +120,11 @@ func run() -> void:
 			check(Puzzle.palette(number) == Puzzle.palette(number + 1), "Five-level palette block")
 		else:
 			check(Puzzle.palette(number) != Puzzle.palette(number + 1), "Next palette block changes")
-	check(Puzzle.palette(1) == Puzzle.palette(26), "Curated hue sequence repeats after five sets")
-	check(absf(Puzzle.palette(1).h - 0.43) < 0.001 and absf(Puzzle.palette(6).h - 0.56) < 0.001 and absf(Puzzle.palette(11).h - 0.74) < 0.001, "Curated mint, sky, and lavender order")
+	check(Puzzle.palette(1) != Puzzle.palette(26), "Default colors do not repeat after five groups")
+	for group in range(100):
+		var hue := Puzzle.palette(group * 5 + 1).h
+		var next_hue := Puzzle.palette(group * 5 + 6).h
+		check(absf(fposmod(next_hue - hue + 0.5, 1.0) - 0.5) > 0.33, "Adjacent default group hues are widely separated")
 	# A route crossing its horizontal middle section vertically.
 	var crossing: Array = [5, 6, 7, 8, 9, 14, 13, 12]
 	check(Puzzle.can_append(crossing, 7, 5, 5), "Perpendicular straight crossing accepted")
@@ -131,8 +159,8 @@ func run() -> void:
 	check(is_equal_approx(background.s, 0.25) and background.v < 0.25, "Background is dark and softly tinted")
 	check(is_equal_approx(menu_background.h, hue.h) and absf(PuzzleBoard.luminance(menu_background) - PuzzleBoard.luminance(background)) < 0.001, "Menu background uses the level's main hue at the same darkness as play")
 	check(is_equal_approx(PuzzleBoard.line_color(hue).h, fposmod(hue.h + 2.0 / 12.0, 1.0)), "Cool purple line shifts 60 degrees toward warmer magenta")
-	check(is_equal_approx(PuzzleBoard.line_color(Puzzle.palette(1)).h, fposmod(Puzzle.palette(1).h - 2.0 / 12.0, 1.0)), "Mint line shifts 60 degrees toward warmer yellow")
-	check(is_equal_approx(PuzzleBoard.line_color(Puzzle.palette(6)).h, fposmod(Puzzle.palette(6).h - 2.0 / 12.0, 1.0)), "Sky line shifts 60 degrees toward warmer green")
+	check(is_equal_approx(PuzzleBoard.line_color(Color.from_hsv(0.43, 1.0, 1.0)).h, 0.43 - 2.0 / 12.0), "Mint line shifts 60 degrees toward warmer yellow")
+	check(is_equal_approx(PuzzleBoard.line_color(Color.from_hsv(0.56, 1.0, 1.0)).h, 0.56 - 2.0 / 12.0), "Sky line shifts 60 degrees toward warmer green")
 	check(is_equal_approx(PuzzleBoard.button_color(hue).h, background.h) and is_equal_approx(PuzzleBoard.text_color(hue).h, background.h) and PuzzleBoard.luminance(PuzzleBoard.button_color(hue)) < PuzzleBoard.luminance(dark_color), "Text and quieter buttons share the background hue")
 	check(is_equal_approx(background.h, fposmod(hue.h + 5.0 / 12.0, 1.0)), "Background uses the first split-complementary hue")
 	check(is_equal_approx(PuzzleBoard.tile_color(2, hue).s, 0.07) and is_equal_approx(PuzzleBoard.tile_color(2, hue).v, 0.45), "Gray tiles remain subdued")
@@ -199,7 +227,7 @@ func run() -> void:
 	check(main.palette_theme.get_color("font_shadow_color", "Label").a > 0.0, "Text has a shadow")
 	check(ProjectSettings.get_setting("display/window/stretch/mode") == "canvas_items" and ProjectSettings.get_setting("display/window/stretch/aspect") == "expand", "Game layout stretches to fill fullscreen")
 	var play_controls := main.content.get_child(2) as HBoxContainer
-	check(play_controls.get_child_count() == 5 and (play_controls.get_child(0) as Button).text == "▦ All puzzles" and play_controls.get_child(1).size_flags_horizontal == Control.SIZE_EXPAND_FILL and (play_controls.get_child(2) as Button).text == "← Previous puzzle" and (play_controls.get_child(3) as Button).text == "↻ Reset line" and (play_controls.get_child(4) as Button).text == "Next puzzle →", "Grid button returns to puzzles and navigation buttons align at the right")
+	check(play_controls.get_child_count() == 5 and (play_controls.get_child(0) as Button).text == "▦ All puzzles" and play_controls.get_child(1).size_flags_horizontal == Control.SIZE_EXPAND_FILL and (play_controls.get_child(2) as Button).text == "← Previous puzzle" and (play_controls.get_child(3) as Button).text == "↻ Reset line" and (play_controls.get_child(4) as Button).text == "Skip →", "Grid button returns to puzzles and navigation buttons align at the right")
 	check(main.background_rect.color == PuzzleBoard.background_color(main.store.get_color(1)), "Entire play screen uses the level background")
 	check((main.board_panel.get_theme_stylebox("panel") as StyleBoxFlat).bg_color == main.background_rect.color, "Play area shares the same background")
 	var b: PuzzleBoard = main.board
@@ -339,6 +367,38 @@ func run() -> void:
 	main.redo_stack.clear()
 	main._sync_editor()
 	var dark_cell: int = original.tiles.find(1)
+	var gray_buttons: Array = main.editor_controls.find_children("", "Button", true, false).filter(func(node): return node.text == "Suggest gray tiles")
+	check(gray_buttons.size() == 1, "The editor offers a gray suggestion button")
+	var gray_path: Array = [5, 6, 7, 8, 9, 14, 13, 12, 7, 2]
+	var gray_light: Array = []
+	gray_light.resize(25)
+	gray_light.fill(0)
+	var before_gray := {"width": 5, "height": 5, "tiles": Puzzle.resolved_tiles(gray_light, gray_path), "solution": gray_path, "solution_start": 5, "solution_end": 2}
+	main.editor_data = before_gray.duplicate(true)
+	main._sync_editor()
+	var saved_before_gray: Dictionary = main.store.levels.duplicate(true)
+	(gray_buttons[0] as Button).pressed.emit()
+	var after_gray: Dictionary = main.editor_data.duplicate(true)
+	check(after_gray.tiles[7] == 2 and after_gray.tiles.count(2) == 1 and Puzzle.is_complete(after_gray.tiles, gray_path), "Suggestion turns a crossover into one gray tile and keeps the solution playable")
+	check(main.undo_stack.size() == 1 and main.store.levels == saved_before_gray and not after_gray.has("solution") and not after_gray.has("solution_start"), "Gray suggestion is one unsaved edit and clears old solution metadata")
+	key(main, KEY_Z, true, true)
+	key(main, KEY_Z, false, true)
+	check(main.editor_data == before_gray and main.board.tiles == before_gray.tiles and main.undo_stack.is_empty(), "Ctrl+Z restores all tiles and solution metadata before the suggestion")
+	key(main, KEY_Y, true, true)
+	key(main, KEY_Y, false, true)
+	check(main.editor_data == after_gray and main.board.tiles == after_gray.tiles, "Ctrl+Y restores the entire gray placement")
+	main.editor_data = {"width": 3, "height": 3, "tiles": [0, 0, 0, 0, 0, 0, 0, 0, 0]}
+	main._sync_editor()
+	var gray_history: int = main.undo_stack.size()
+	(gray_buttons[0] as Button).pressed.emit()
+	check(main.undo_stack.size() == gray_history and main.editor_message.text.contains("No useful"), "No useful suggestion leaves history untouched and explains why")
+	main._toggle_editor_playtest()
+	check((gray_buttons[0] as Button).disabled, "Gray suggestions are disabled during playtest")
+	main._toggle_editor_playtest()
+	main.editor_data = original.duplicate(true)
+	main.undo_stack.clear()
+	main.redo_stack.clear()
+	main._sync_editor()
 	var right_press := InputEventMouseButton.new()
 	right_press.button_index = MOUSE_BUTTON_RIGHT
 	right_press.pressed = true
@@ -397,12 +457,14 @@ func run() -> void:
 	main.move_input.value = 7
 	main._generate_editor_level()
 	check(main.editor_data.width == before_generated.width and main.editor_data.height == before_generated.height and main.editor_data.tiles.has(1), "Generate fills the editor at its current dimensions")
-	check(main.undo_stack.size() == history_before_generation + 1 and main.store.levels == saved_before_generation, "Generated editor layout is one unsaved undoable edit")
-	check(main.editor_message.text.contains("Generated 7 moves with exactly 0 crossovers"), "Editor uses and reports the chosen move and exact crossover count")
+	var generated_path: Array = main.store.get_level(main.editor_level).solution
+	check(main.undo_stack.size() == history_before_generation + 1 and not generated_path.is_empty() and main.store.get_level(main.editor_level).tiles == main.editor_data.tiles and Puzzle.is_complete(main.editor_data.tiles, generated_path), "Generate saves its layout and full solution together")
+	check(LevelStore.new().get_level(main.editor_level).solution == generated_path, "The generated solution survives reload")
+	check(main.editor_message.text.contains("Generated and saved 7 moves with exactly 0 crossovers"), "Editor uses and reports the chosen move and exact crossover count")
 	main._editor_undo()
-	check(main.editor_data == before_generated, "Undo restores the editor layout before generation")
+	check(main.editor_data == before_generated and main.store.levels == saved_before_generation, "Undo restores both the draft and saved level before generation")
 	main._editor_redo()
-	check(main.editor_data.tiles.has(1), "Redo restores the generated layout")
+	check(main.editor_data.tiles.has(1) and main.store.get_level(main.editor_level).solution == generated_path, "Redo restores the generated layout and solution")
 	main._editor_undo()
 	main.crossover_input.value = 3
 	main.move_input.value = 2
@@ -426,13 +488,13 @@ func run() -> void:
 	check(main.editor_mode_hint.text.begins_with("SOLVED"), "Playtest completion is visible in the editor header")
 	check(main.store.has_solution(main.editor_level) and main.store.hint_endpoints(main.editor_level) == [0, 1], "Editor playtest records solution endpoints without completing the level")
 	var editor_solution_reload := LevelStore.new()
-	check(editor_solution_reload.hint_endpoints(main.editor_level) == [0, 1], "Editor solution endpoints survive reload")
+	check(editor_solution_reload.hint_endpoints(main.editor_level) == [0, 1] and editor_solution_reload.get_level(main.editor_level).solution == [0, 1], "Editor solution path and endpoints survive reload")
 	key(main, KEY_SPACE, true)
 	check(not main.editor_playtesting and main.board.editing and main.board.path.is_empty(), "Space returns to building and clears test line")
 	check(main.editor_data == before_playtest and main.board.tiles == before_playtest.tiles and main.undo_stack.size() == before_playtest_history, "Playtest preserves unsaved layout and undo history")
 	main._paint_value(2, 1)
 	main._save_editor()
-	check(not main.store.has_solution(main.editor_level), "Saving an edited level forgets its recorded solution")
+	check(not main.store.has_solution(main.editor_level) and not main.store.get_level(main.editor_level).has("solution"), "Saving an edited level forgets its recorded solution")
 	key(main, KEY_SPACE, false)
 	var history_size: int = main.undo_stack.size()
 	key(main, KEY_SHIFT, true, false, true)
@@ -525,21 +587,30 @@ func run() -> void:
 	await create_timer(2.7).timeout
 	check(main.current_level == 3, "Celebration automatically advances")
 	check(main.completed_badge == null, "An unfinished next puzzle has no completion badge")
-	check(main.hint_button != null and main.hint_button.text == "Hint (-1 coin)" and main.hint_button.focus_mode == Control.FOCUS_NONE and not main.hint_button.disabled, "Hint shows its price and does not take Space key focus")
+	check(main.hint_button != null and main.hint_button.text == "Hint -2" and main.hint_button.icon == main.CoinIcon.TEXTURE and main.hint_button.focus_mode == Control.FOCUS_NONE and not main.hint_button.disabled and main.hint_button.get_parent() == main.content.get_child(2) and main.hint_button.get_index() == 1, "First hint displays its two-coin price with the shared vector icon beside All puzzles without taking Space key focus")
+	main.store.credits = 1
+	main._update_credits_display()
 	main.hint_button.pressed.emit()
-	check(main.store.credits == 1 and main.store.hint_stage(3) == 1 and main.hint_button.disabled and main.hint_busy, "Buying the first hint saves its reveal and blocks repeat clicks during animation")
+	check(main.hint_button.disabled and not main.hint_busy and main.store.purchase_hint(3) == ERR_UNAVAILABLE and main.store.credits == 1 and main.store.hint_stage(3) == 0, "One coin cannot buy the first hint through the UI or store")
+	main.store.credits = 2
+	main._update_credits_display()
+	main.hint_button.pressed.emit()
+	check(main.store.credits == 0 and main.store.hint_stage(3) == 1 and main.hint_button.disabled and main.hint_busy, "First hint spends two coins, saves its reveal, and blocks repeat clicks")
 	await create_timer(0.75).timeout
-	check(main.board.hint_start_label.visible and main.board.hint_start_label.text == "Start" and main.board.hint_start_cell == main.hint_endpoints[0] and not main.hint_button.disabled, "The first purchased hint reveals the solution start")
+	check(main.board.hint_start_label.visible and main.board.hint_start_label.text == "Start" and main.board.hint_start_cell == main.hint_endpoints[0] and main.hint_button.disabled and main.hint_button.text == "Hint -1", "First hint reveals the start; the second costs one coin and waits for funds")
 	main.play_level(4)
 	main.play_level(3)
-	check(main.board.hint_start_label.visible and not main.board.hint_finish_label.visible and main.hint_row.visible and main.store.credits == 1, "The first hint remains on its level after navigating away and back")
+	check(main.board.hint_start_label.visible and not main.board.hint_finish_label.visible and main.hint_button.visible and main.store.credits == 0, "The first hint remains on its level after navigating away and back")
+	main.store.credits = 1
+	main._update_credits_display()
+	check(not main.hint_button.disabled and main.store.hint_cost(3) == 1, "One coin enables the second hint")
 	main.hint_button.pressed.emit()
 	check(main.store.credits == 0 and main.store.hint_stage(3) == 2 and main.hint_button.disabled and main.hint_busy, "Buying the second hint saves its reveal and spends one more credit")
 	await create_timer(0.75).timeout
-	check(main.board.hint_finish_label.visible and main.board.hint_finish_label.text == "Finish" and main.board.hint_finish_cell == main.hint_endpoints[1] and not main.hint_row.visible, "The second hint reveals the finish and removes the Hint button")
+	check(main.board.hint_finish_label.visible and main.board.hint_finish_label.text == "Finish" and main.board.hint_finish_cell == main.hint_endpoints[1] and not main.hint_button.visible, "The second hint reveals the finish and removes the Hint button")
 	main.play_level(4)
 	main.play_level(3)
-	check(main.board.hint_start_label.visible and main.board.hint_finish_label.visible and not main.hint_row.visible and main.store.credits == 0, "Both hints remain visible and the button stays gone after revisiting")
+	check(main.board.hint_start_label.visible and main.board.hint_finish_label.visible and not main.hint_button.visible and main.store.credits == 0, "Both hints remain visible and the button stays gone after revisiting")
 	var hint_reload := LevelStore.new()
 	check(hint_reload.hint_stage(3) == 2 and hint_reload.credits == 0, "Purchased hints and spent credits survive reload")
 	main.play_level(2)
@@ -771,7 +842,7 @@ func run() -> void:
 	check(reorder_store.rearrange_level(1, 3, "insert", true) == OK, "Insert moves a dragged level after the target")
 	check(reorder_store.get_level(1).tiles == first_layout.tiles and reorder_store.get_level(2).tiles == original_three.tiles and reorder_store.get_level(3).tiles == original_one.tiles, "Insert shifts puzzles into their new slots")
 	check(reorder_store.rearrange_level(2, 4, "swap") == OK, "Swap exchanges the dragged and target levels")
-	check(reorder_store.get_level(4).tiles == original_three.tiles and not reorder_store.completed.has("2") and reorder_store.completed.has("4") and reorder_store.menu_unlocked() == 10, "Swap carries completion and preserves unlocked groups")
+	check(reorder_store.get_level(4).tiles == original_three.tiles and reorder_store.get_level(4).solution == original_three.solution and not reorder_store.completed.has("2") and reorder_store.completed.has("4") and reorder_store.menu_unlocked() == 10, "Swap carries the full solution and completion while preserving unlocked groups")
 	check(reorder_store.rearrange_level(4, 1, "insert", false) == OK and reorder_store.get_level(1).tiles == original_three.tiles, "Insert also moves a dragged level before the target")
 	check(reorder_store.hint_stage(1) == 2 and reorder_store.hint_stage(4) == 1, "Rearranging keeps purchased hints with their puzzles")
 	check(reorder_store.rearrange_level(1, 1, "swap") == ERR_INVALID_PARAMETER, "Dropping a level on itself leaves the order alone")
@@ -847,11 +918,11 @@ func run() -> void:
 	check(shown_numbers == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "Rearranging keeps the unlocked groups visible")
 	main.play_level(10)
 	play_controls = main.content.get_child(2) as HBoxContainer
-	(play_controls.get_child(4) as Button).pressed.emit()
-	check(main.current_level == 10 and main.screen_shake_tween.is_running(), "Next puzzle at the last unlocked level shakes without wrapping")
+	(play_controls.get_child(play_controls.get_child_count() - 1) as Button).pressed.emit()
+	check(main.current_level == 10 and main.screen_shake_tween.is_running(), "Skip at the last unlocked level shakes without wrapping")
 	check(main.find_children("", "Label", true, false).any(func(node): return node.text == "Complete more puzzles..." and node.get_theme_color("font_outline_color") == Color.BLACK), "Locked next puzzle shows outlined floating feedback")
 	play_controls = main.content.get_child(2) as HBoxContainer
-	(play_controls.get_child(2) as Button).pressed.emit()
+	(play_controls.get_child(play_controls.get_child_count() - 3) as Button).pressed.emit()
 	check(main.current_level == 9, "Previous puzzle button visits the adjacent level")
 	print("%d checks, %d failures in %.2fs" % [checks, failures, (Time.get_ticks_msec() - started) / 1000.0])
 	quit(1 if failures else 0)

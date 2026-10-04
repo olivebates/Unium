@@ -10,6 +10,8 @@ var width: int
 var height: int
 var tiles: Array
 var path: Array = []
+var last_checked_path: Array = []
+var popped_since_check: Array = []
 var visits := PackedByteArray()
 var first_in := PackedByteArray()
 var first_out := PackedByteArray()
@@ -96,6 +98,7 @@ func advance(budget_usec: int = 2500) -> void:
 			if starts.is_empty():
 				if deferred_starts.is_empty():
 					status = "unsolvable"
+					_update_checked_path()
 					return
 				starts = deferred_starts.duplicate()
 				starts.reverse()
@@ -112,6 +115,7 @@ func advance(budget_usec: int = 2500) -> void:
 			if dark_left == 0 and open_light == 0 and path.size() >= 2:
 				solution = path.duplicate()
 				status = "solved"
+				_update_checked_path()
 				return
 			# This is an overestimate of future reachability: it permits turns
 			# through unvisited light cells, so it cannot reject a legal route.
@@ -119,6 +123,19 @@ func advance(budget_usec: int = 2500) -> void:
 				choices.append([])
 			else:
 				choices.append(_next_choices())
+	_update_checked_path()
+
+func _update_checked_path() -> void:
+	# Reconstruct the most recently tested branch once per frame, including
+	# any tail already popped while backtracking. Avoid copying every node.
+	if status == "solved":
+		last_checked_path = solution.duplicate()
+	elif not known_prefix.is_empty():
+		last_checked_path = known_prefix.duplicate()
+	elif nodes > 0:
+		last_checked_path = path.duplicate()
+		for i in range(popped_since_check.size() - 1, -1, -1):
+			last_checked_path.append(popped_since_check[i])
 
 func _direction(from: int, to: int) -> int:
 	var delta := to - from
@@ -178,6 +195,7 @@ func _move_score(cell: int) -> int:
 	return 100 - exits
 
 func _push(cell: int) -> void:
+	popped_since_check.clear()
 	var direction := 0
 	if not path.is_empty():
 		var previous: int = path.back()
@@ -197,6 +215,7 @@ func _push(cell: int) -> void:
 
 func _pop() -> void:
 	var cell: int = path.pop_back()
+	popped_since_check.append(cell)
 	visits[cell] -= 1
 	if tiles[cell] == 1:
 		dark_left += 1

@@ -102,6 +102,21 @@ func run() -> void:
 	main.store.credits = 0
 	main.store.levels.clear()
 	main._toggle_editor()
+	main.editor_data = generated.duplicate(true)
+	main._sync_editor()
+	main.editor_solve_button.pressed.emit()
+	for frame in range(4):
+		await process_frame
+	check(main.editor_solver != null and not main.board.path.is_empty(), "An ongoing editor search displays a route before solving")
+	if main.editor_solver != null:
+		check(main.board.path == main.editor_solver.last_checked_path and main.editor_message.text.contains("Last path: %d tiles" % main.board.path.size()), "Each solver frame displays the last checked route and its length")
+		var preview_prefix: Array = []
+		for cell in main.board.path:
+			check(Puzzle.can_append(preview_prefix, cell, main.board.width, main.board.height), "The preview is a legal branch even after solver backtracking")
+			preview_prefix.append(cell)
+		check(main.board.rendered_values == Puzzle.resolved_tiles(main.editor_data.tiles, main.board.path), "Live preview also shows the route's tile flips")
+	main._toggle_editor_playtest()
+	check(main.board.path.is_empty() and main.editor_solver == null and main.editor_data == generated, "Cancelling the live preview clears the line without editing the draft")
 	main.editor_data = simple.duplicate(true)
 	main._sync_editor()
 	var history: Array = main.undo_stack.duplicate(true)
@@ -111,8 +126,14 @@ func run() -> void:
 	check(main.editor_playtesting and main.board.locked and legal_solution(simple, main.board.path), "The found line is displayed as a solved playtest")
 	check(main.editor_data == simple and main.undo_stack == history, "Solving preserves the editor layout and edit history")
 	check(main.store.completed.is_empty() and main.store.credits == 0 and main.store.hint_endpoints(main.editor_level) == [main.board.path.front(), main.board.path.back()], "Solving records endpoints without awarding completion or credits")
+	var saved_route: Array = main.board.path.duplicate()
+	check(main.store.get_level(main.editor_level).solution == saved_route, "Solving saves the whole route for later viewing")
 	main._toggle_editor_playtest()
 	check(main.board.editing and main.board.path.is_empty() and not main.editor_solve_button.disabled, "Space-to-build behavior restores editing after a solution")
+	main.editor_solve_button.pressed.emit()
+	await wait_for_editor(main)
+	check(main.board.path == saved_route and main.editor_playtesting, "Solve shows an already saved route again")
+	main._toggle_editor_playtest()
 	main.editor_solve_button.pressed.emit()
 	main.editor_solve_button.pressed.emit()
 	await process_frame
