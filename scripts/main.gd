@@ -6,6 +6,7 @@ const MenuThumbnailJob = preload("res://scripts/menu_thumbnail_job.gd")
 const CompletedBadge = preload("res://scripts/completed_badge.gd")
 const CoinIcon = preload("res://scripts/coin_icon.gd")
 const PuzzleSolver = preload("res://scripts/puzzle_solver.gd")
+const UnsolvedGlowShader = preload("res://assets/unsolved_glow.gdshader")
 const SCREEN_TRANSITION_DURATION := 0.2
 
 const BG := Color("0c1219")
@@ -25,6 +26,7 @@ var current_level := 1
 var board: PuzzleBoard
 var board_panel: PanelContainer
 var completed_badge: Control
+var completion_layer: Control
 var credit_display: HBoxContainer
 var credit_label: Label
 var hint_button: Button
@@ -47,6 +49,8 @@ var rearrange_mode := false
 var rearrange_action := "insert"
 var menu_rows: VBoxContainer
 var menu_cards: Array[Button] = []
+var menu_glow_material: ShaderMaterial
+var menu_glow_style: StyleBoxFlat
 var menu_hint: PanelContainer
 var screen_shake_tween: Tween
 var screen_shake_offsets: Array[Vector2] = []
@@ -59,6 +63,8 @@ var menu_thumbnail_job: RefCounted
 var pending_menu_level := 0
 var menu_scroll: ScrollContainer
 var menu_scroll_position := 0
+var progress_delete_dialog: ConfirmationDialog
+var progress_delete_step := 0
 var screen_transition: Control
 var screen_transition_tween: Tween
 var transition_new_shell: Control
@@ -128,6 +134,12 @@ func _ready() -> void:
 	RenderingServer.set_default_clear_color(BG)
 	shake_rng.randomize()
 	_build_theme()
+	menu_glow_material = ShaderMaterial.new()
+	menu_glow_material.shader = UnsolvedGlowShader
+	menu_glow_style = box(Color(1.0, 0.83, 0.15, 0.20), 9)
+	menu_glow_style.shadow_color = Color(1.0, 0.80, 0.08, 0.55)
+	menu_glow_style.shadow_size = 6
+	menu_glow_style.shadow_offset = Vector2.ZERO
 	resized.connect(func():
 		_finish_screen_transition()
 		_update_menu_columns()
@@ -496,6 +508,7 @@ func _shell(restore_menu: bool = false) -> void:
 	board = null
 	board_panel = null
 	completed_badge = null
+	completion_layer = null
 	credit_display = null
 	credit_label = null
 	hint_button = null
@@ -506,6 +519,8 @@ func _shell(restore_menu: bool = false) -> void:
 	menu_cards.clear()
 	menu_hint = null
 	menu_scroll = null
+	progress_delete_dialog = null
+	progress_delete_step = 0
 	menu_columns = 0
 	background_rect = null
 	toast = null
@@ -595,8 +610,80 @@ func show_menu() -> void:
 	_update_menu_columns()
 	active_menu_signature = _menu_signature()
 	scroll.set_deferred("scroll_vertical", menu_scroll_position)
+	if not rearrange_mode:
+		var footer := HBoxContainer.new()
+		content.add_child(footer)
+		footer.add_child(_delete_progress_button())
+		spacer(footer)
 	if outgoing:
 		_start_screen_transition(outgoing, "close", old_board)
+
+func _delete_progress_button() -> Button:
+	var delete_button := button("Delete Progress", _begin_delete_progress)
+	delete_button.focus_mode = Control.FOCUS_NONE
+	for state in ["normal", "hover", "pressed"]:
+		var fill := Color("842a32")
+		if state == "hover":
+			fill = Color("a93641")
+		elif state == "pressed":
+			fill = Color("682027")
+		var style := box(fill, 12)
+		style.content_margin_left = 20
+		style.content_margin_right = 20
+		style.content_margin_top = 12
+		style.content_margin_bottom = 12
+		delete_button.add_theme_stylebox_override(state, style)
+	delete_button.add_theme_color_override("font_color", Color.WHITE)
+	delete_button.add_theme_color_override("font_hover_color", Color.WHITE)
+	delete_button.add_theme_color_override("font_pressed_color", Color.WHITE)
+	return delete_button
+
+func _begin_delete_progress() -> void:
+	if screen != "menu" or rearrange_mode or is_instance_valid(progress_delete_dialog):
+		return
+	progress_delete_step = 1
+	progress_delete_dialog = ConfirmationDialog.new()
+	progress_delete_dialog.confirmed.connect(_advance_delete_progress)
+	progress_delete_dialog.canceled.connect(_cancel_delete_progress)
+	add_child(progress_delete_dialog)
+	_show_delete_progress_step()
+
+func _show_delete_progress_step() -> void:
+	if not is_instance_valid(progress_delete_dialog) or screen != "menu":
+		return
+	var prompts := [
+		"Delete your puzzle progress?",
+		"This also removes coins and purchased hints. Continue?",
+		"Final confirmation: start over from level 1?"
+	]
+	progress_delete_dialog.title = "Delete Progress (%d/3)" % progress_delete_step
+	progress_delete_dialog.dialog_text = prompts[progress_delete_step - 1]
+	progress_delete_dialog.get_ok_button().text = "Delete Progress" if progress_delete_step == 3 else "Continue"
+	progress_delete_dialog.popup_centered(Vector2i(460, 180))
+
+func _advance_delete_progress() -> void:
+	if not is_instance_valid(progress_delete_dialog) or screen != "menu":
+		return
+	if progress_delete_step < 3:
+		progress_delete_step += 1
+		_show_delete_progress_step.call_deferred()
+		return
+	_cancel_delete_progress()
+	var result := store.reset_all_progress()
+	if result != OK:
+		_show_toast("Progress could not be deleted: " + error_string(result))
+		return
+	menu_scroll_position = 0
+	menu_hovered_level = 0
+	show_menu()
+
+func _cancel_delete_progress() -> void:
+	var dialog := progress_delete_dialog
+	progress_delete_dialog = null
+	progress_delete_step = 0
+	if is_instance_valid(dialog):
+		dialog.hide()
+		dialog.queue_free()
 
 func _locked_group_hint() -> PanelContainer:
 	var hint := PanelContainer.new()
@@ -638,9 +725,12 @@ func _on_locked_hint_input(event: InputEvent) -> void:
 
 func _show_locked_feedback(pointer: Vector2) -> void:
 	_shake_screen()
-	var feedback := label("Complete more puzzles...", 18)
+	_show_floating_feedback(pointer, "Complete more puzzles...", Color.WHITE)
+
+func _show_floating_feedback(pointer: Vector2, message: String, color: Color) -> void:
+	var feedback := label(message, 18)
 	feedback.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	feedback.add_theme_color_override("font_color", Color.WHITE)
+	feedback.add_theme_color_override("font_color", color)
 	feedback.add_theme_color_override("font_outline_color", Color.BLACK)
 	feedback.add_theme_constant_override("outline_size", 5)
 	feedback.z_index = 100
@@ -705,6 +795,14 @@ func _level_card(number: int) -> Button:
 		preview.texture = cached.texture
 	else:
 		menu_thumbnail_queue.append(number)
+	if not completed:
+		var glow := PanelContainer.new()
+		glow.name = "UnsolvedGlow"
+		glow.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		glow.material = menu_glow_material
+		glow.add_theme_stylebox_override("panel", menu_glow_style)
+		card.add_child(glow)
 	var outline := Panel.new()
 	outline.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	outline.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1087,12 +1185,15 @@ func _update_hint_button() -> void:
 	var cost := store.hint_cost(current_level)
 	hint_button.text = "Hint -%d" % cost
 	hint_button.tooltip_text = "Reveal the %s (%d coin%s)." % ["start" if hint_stage == 0 else "finish", cost, "s" if cost != 1 else ""]
-	hint_button.disabled = hint_busy or store.credits < cost or hint_endpoints.size() != 2
+	hint_button.disabled = hint_busy or hint_endpoints.size() != 2
 
 func _use_hint() -> void:
 	if screen != "play" or hint_busy or hint_stage >= 2:
 		return
-	if store.credits < store.hint_cost(current_level) or hint_endpoints.size() != 2:
+	if hint_endpoints.size() != 2:
+		return
+	if store.credits < store.hint_cost(current_level):
+		_show_floating_feedback(get_global_mouse_position(), "Need more coins...", Color("f45d67"))
 		return
 	var result := store.purchase_hint(current_level)
 	if result != OK:
@@ -1180,14 +1281,20 @@ func _animate_level_background(previous: Color, target: Color, duration: float =
 	background_tween.tween_property(panel_style, "bg_color", target, duration).set_trans(Tween.TRANS_SINE)
 
 func _complete_level() -> void:
+	if is_instance_valid(completion_layer):
+		return
+	var previously_unlocked := store.menu_unlocked()
 	var result := store.mark_complete(current_level)
+	var now_unlocked := store.menu_unlocked()
+	var new_group_unlocked := now_unlocked > previously_unlocked
+	var can_advance := current_level < now_unlocked
 	_update_credits_display()
 	_show_completed_badge()
 	if result != OK:
 		_show_toast("Progress could not be saved: " + error_string(result))
-	var token := transition_id
 	var tint := store.get_color(current_level)
 	var layer := Control.new()
+	completion_layer = layer
 	layer.theme = palette_theme
 	layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	layer.mouse_filter = Control.MOUSE_FILTER_STOP
@@ -1200,21 +1307,34 @@ func _complete_level() -> void:
 	center_container.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	layer.add_child(center_container)
 	var message := VBoxContainer.new()
+	message.custom_minimum_size.x = minf(620.0, size.x - 88.0)
 	message.add_theme_constant_override("separation", 16)
 	center_container.add_child(message)
 	var rng := RandomNumberGenerator.new()
 	rng.randomize()
 	var praise: String = CelebrationLines.LINES[rng.randi_range(0, CelebrationLines.LINES.size() - 1)].trim_suffix(".") + "!"
+	if new_group_unlocked:
+		praise = "New puzzles unlocked!"
+	elif not can_advance:
+		praise = "Good job! You must complete more puzzles to continue."
 	var celebration_lines := [["✦", 64, tint], ["Level %d complete!" % current_level, 40, TEXT], [praise, 18, tint]]
 	for index in range(celebration_lines.size()):
 		var item: Array = celebration_lines[index]
 		var text_label := label(item[0], item[1], item[2])
 		if index == 2:
 			text_label.add_theme_color_override("font_color", PuzzleBoard.tile_color(0, tint))
+			text_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		text_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		message.add_child(text_label)
+	var actions := HBoxContainer.new()
+	actions.alignment = BoxContainer.ALIGNMENT_CENTER
+	actions.add_theme_constant_override("separation", 12)
+	message.add_child(actions)
+	actions.add_child(button("Back to Puzzle Selection", _return_to_menu))
+	if can_advance:
+		actions.add_child(button("Next Puzzle", func(): _open_adjacent_level(1), true))
 	layer.modulate.a = 0
-	var fade := create_tween()
+	var fade := layer.create_tween()
 	fade.tween_property(layer, "modulate:a", 1.0, 0.35)
 	for i in range(48):
 		var spark := ColorRect.new()
@@ -1224,17 +1344,11 @@ func _complete_level() -> void:
 		spark.position = size * 0.5
 		layer.add_child(spark)
 		var destination := size * 0.5 + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(160, 440)
-		var tween := create_tween().set_parallel(true)
+		var tween := spark.create_tween().set_parallel(true)
 		tween.tween_property(spark, "position", destination, 1.6).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 		tween.tween_property(spark, "rotation", rng.randf_range(-5, 5), 1.6)
 		tween.tween_property(spark, "modulate:a", 0.0, 1.4).set_delay(0.3)
-	await get_tree().create_timer(2.5).timeout
-	if token == transition_id and screen == "play":
-		if current_level >= store.menu_unlocked():
-			layer.queue_free()
-			_show_locked_feedback(get_global_mouse_position())
-		else:
-			_open_adjacent_uncompleted(1)
+		tween.finished.connect(spark.queue_free)
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and menu_drag_source > 0:
@@ -1252,6 +1366,10 @@ func _input(event: InputEvent) -> void:
 	else:
 		pressed_keys.erase(key)
 	if key == KEY_ESCAPE and event.pressed:
+		if is_instance_valid(progress_delete_dialog):
+			_cancel_delete_progress()
+			get_viewport().set_input_as_handled()
+			return
 		_return_to_menu()
 		get_viewport().set_input_as_handled()
 		return

@@ -585,19 +585,30 @@ func run() -> void:
 	check(praise_labels.size() == 1 and praise_labels[0].get_theme_color("font_color").is_equal_approx(PuzzleBoard.tile_color(0, main.store.get_color(2))), "Celebration subtext matches the light tile color")
 	check(not "Take a breath. Your next puzzle is on its way." in celebration_text, "Celebration has no bottom sentence")
 	await create_timer(2.7).timeout
-	check(main.current_level == 3, "Celebration automatically advances")
+	check(main.current_level == 2 and is_instance_valid(main.completion_layer), "Celebration stays open without automatically advancing")
+	var celebration_buttons: Array = main.completion_layer.find_children("", "Button", true, false)
+	check(celebration_buttons.size() == 2 and celebration_buttons[0].text == "Back to Puzzle Selection" and celebration_buttons[1].text == "Next Puzzle", "Celebration offers selection and next-puzzle buttons side by side")
+	celebration_buttons[1].pressed.emit()
+	check(main.current_level == 3 and main.completion_layer == null, "Next Puzzle closes the celebration and opens the adjacent puzzle")
 	check(main.completed_badge == null, "An unfinished next puzzle has no completion badge")
 	check(main.hint_button != null and main.hint_button.text == "Hint -2" and main.hint_button.icon == main.CoinIcon.TEXTURE and main.hint_button.focus_mode == Control.FOCUS_NONE and not main.hint_button.disabled and main.hint_button.get_parent() == main.content.get_child(2) and main.hint_button.get_index() == 1, "First hint displays its two-coin price with the shared vector icon beside All puzzles without taking Space key focus")
 	main.store.credits = 1
 	main._update_credits_display()
 	main.hint_button.pressed.emit()
-	check(main.hint_button.disabled and not main.hint_busy and main.store.purchase_hint(3) == ERR_UNAVAILABLE and main.store.credits == 1 and main.store.hint_stage(3) == 0, "One coin cannot buy the first hint through the UI or store")
+	var insufficient_feedback: Array = main.find_children("", "Label", true, false).filter(func(node): return node.text == "Need more coins...")
+	check(not main.hint_button.disabled and not main.hint_busy and insufficient_feedback.size() == 1 and insufficient_feedback[0].get_theme_color("font_color").r > insufficient_feedback[0].get_theme_color("font_color").g and insufficient_feedback[0].get_theme_color("font_outline_color") == Color.BLACK and main.store.purchase_hint(3) == ERR_UNAVAILABLE and main.store.credits == 1 and main.store.hint_stage(3) == 0, "An affordable hint is needed; otherwise a red floating message appears without spending a coin")
+	var feedback_start_y: float = insufficient_feedback[0].position.y
+	await create_timer(0.10).timeout
+	check(insufficient_feedback[0].position.y < feedback_start_y, "The insufficient-coins message floats upward")
 	main.store.credits = 2
 	main._update_credits_display()
 	main.hint_button.pressed.emit()
 	check(main.store.credits == 0 and main.store.hint_stage(3) == 1 and main.hint_button.disabled and main.hint_busy, "First hint spends two coins, saves its reveal, and blocks repeat clicks")
 	await create_timer(0.75).timeout
-	check(main.board.hint_start_label.visible and main.board.hint_start_label.text == "Start" and main.board.hint_start_cell == main.hint_endpoints[0] and main.hint_button.disabled and main.hint_button.text == "Hint -1", "First hint reveals the start; the second costs one coin and waits for funds")
+	check(main.board.hint_start_label.visible and main.board.hint_start_label.text == "Start" and main.board.hint_start_cell == main.hint_endpoints[0] and not main.hint_button.disabled and main.hint_button.text == "Hint -1", "First hint reveals the start; the second stays clickable when coins are low")
+	var feedback_count: int = main.find_children("", "Label", true, false).filter(func(node): return node.text == "Need more coins...").size()
+	main.hint_button.pressed.emit()
+	check(main.store.credits == 0 and main.store.hint_stage(3) == 1 and main.find_children("", "Label", true, false).filter(func(node): return node.text == "Need more coins...").size() == feedback_count + 1, "An unfunded second hint also floats feedback without buying the hint")
 	main.play_level(4)
 	main.play_level(3)
 	check(main.board.hint_start_label.visible and not main.board.hint_finish_label.visible and main.hint_button.visible and main.store.credits == 0, "The first hint remains on its level after navigating away and back")
@@ -626,7 +637,7 @@ func run() -> void:
 	key(main, KEY_Z, false, false, true)
 	key(main, KEY_SHIFT, false)
 	await create_timer(2.7).timeout
-	check(main.screen == "editor" and main.current_level == 2, "Opening editor cancels pending level advance")
+	check(main.screen == "editor" and main.current_level == 2, "Opening the editor from the celebration stays on the same puzzle")
 	main._toggle_editor()
 	check(main.screen == "play" and main.board.path.is_empty(), "Closing editor restarts completed level cleanly")
 	main.play_level(5)
@@ -871,7 +882,7 @@ func run() -> void:
 	key(main, KEY_Z, true, false, true)
 	key(main, KEY_M, true, false, true)
 	check(main.store.frontier() == 100 and main.store.completed.has("99"), "Shift+Z+M completes and unlocks the first 99 levels")
-	var menu_scroll := main.content.get_child(main.content.get_child_count() - 1) as ScrollContainer
+	var menu_scroll: ScrollContainer = main.menu_scroll
 	check(main.menu_cards.size() == 105 and main.menu_columns <= 15 and main.menu_rows.get_child_count() == ceili(106.0 / main.menu_columns) and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_BEGIN and menu_scroll.vertical_scroll_mode == ScrollContainer.SCROLL_MODE_SHOW_ALWAYS, "Menu shows every unlocked group in one scrollable grid")
 	check(main.credit_label.text == str(main.store.credits), "Unlock shortcut refreshes the menu credits")
 	key(main, KEY_M, false, false, true)
@@ -891,16 +902,18 @@ func run() -> void:
 	key(main, KEY_Z, false, false, true)
 	key(main, KEY_SHIFT, false)
 	main.play_level(20)
+	main.store.hints["3"] = 2
+	check(main.store.save_progress() == OK, "Purchased hints are present before the reset shortcut")
 	key(main, KEY_SHIFT, true, false, true)
 	key(main, KEY_Z, true, false, true)
 	key(main, KEY_N, true, false, true)
-	check(main.store.frontier() == 2 and main.store.completed.size() == 1 and main.store.completed.has("1"), "Shift+Z+N clears completion except level 1")
+	check(main.store.frontier() == 2 and main.store.completed.size() == 1 and main.store.completed.has("1") and main.store.hints.is_empty(), "Shift+Z+N clears completion except level 1 and all purchased hints")
 	check(main.screen == "menu" and main.menu_cards.size() == 5 and main.credit_label.text == "1", "Reset shortcut restores the first unlocked group and one credit")
 	key(main, KEY_N, false, false, true)
 	key(main, KEY_Z, false, false, true)
 	key(main, KEY_SHIFT, false)
 	var progress_reload := LevelStore.new()
-	check(progress_reload.frontier() == 2, "Reset completion survives reload")
+	check(progress_reload.frontier() == 2 and progress_reload.hints.is_empty(), "Reset completion and hints survive reload")
 	main.store.completed = {"1": true, "3": true, "4": true, "7": true}
 	main.show_menu()
 	var shown_numbers: Array = main.menu_cards.map(func(card): return int(card.get("level_number")))
@@ -924,6 +937,77 @@ func run() -> void:
 	play_controls = main.content.get_child(2) as HBoxContainer
 	(play_controls.get_child(play_controls.get_child_count() - 3) as Button).pressed.emit()
 	check(main.current_level == 9, "Previous puzzle button visits the adjacent level")
+	main.store.completed.clear()
+	main.store.unlocked_through = 0
+	main.store.credits = 0
+	main.play_level(5)
+	main._complete_level()
+	celebration_buttons = main.completion_layer.find_children("", "Button", true, false)
+	celebration_text = main.completion_layer.find_children("", "Label", true, false).map(func(node): return node.text)
+	check(celebration_buttons.size() == 1 and celebration_buttons[0].text == "Back to Puzzle Selection" and "Good job! You must complete more puzzles to continue." in celebration_text, "Last unlocked puzzle hides Next and explains how to unlock more")
+	celebration_buttons[0].pressed.emit()
+	check(main.screen == "menu" and main.completion_layer == null and main.menu_cards.size() == 5, "Back to Puzzle Selection closes the celebration and opens the menu")
+	check(main.menu_cards.slice(0, 4).all(func(card): return card.has_node("UnsolvedGlow")) and not main.menu_cards[4].has_node("UnsolvedGlow"), "Only unsolved puzzle cards have a yellow glow")
+	main.play_level(1)
+	main.show_menu()
+	check(main.menu_cards[0].has_node("UnsolvedGlow") and not main.menu_cards[4].has_node("UnsolvedGlow"), "Returning to the retained menu preserves the correct glow states")
+	main.store.completed = {"1": true, "2": true, "6": true}
+	main.store.unlocked_through = 0
+	main.play_level(5)
+	main._complete_level()
+	celebration_buttons = main.completion_layer.find_children("", "Button", true, false)
+	celebration_text = main.completion_layer.find_children("", "Label", true, false).map(func(node): return node.text)
+	check(main.store.menu_unlocked() == 10 and "New puzzles unlocked!" in celebration_text and celebration_buttons.size() == 2, "Unlocking a group shows the new-puzzles message and makes Next available")
+	celebration_buttons[1].pressed.emit()
+	check(main.current_level == 6 and main.screen == "play" and main.completion_layer == null, "Celebration Next visits the adjacent newly available puzzle even if completed")
+	main.store.completed = {"1": true, "2": true}
+	main.store.unlocked_through = 0
+	main.play_level(3)
+	main._complete_level()
+	celebration_text = main.completion_layer.find_children("", "Label", true, false).map(func(node): return node.text)
+	check("New puzzles unlocked!" in celebration_text, "Any completion that opens a new group replaces the flavor text")
+	main._return_to_menu()
+	main.store.completed = {"1": true, "2": true, "3": true}
+	main.store.hints = {"2": 2}
+	main.store.credits = 9
+	main.store.unlocked_through = 10
+	check(main.store.save_progress() == OK, "The delete-progress test starts with saved completions, coins, and hints")
+	var retained_levels: Dictionary = main.store.levels.duplicate(true)
+	var retained_colors: Dictionary = main.store.colors.duplicate(true)
+	var saved_levels_before_delete := FileAccess.get_file_as_string(LevelStore.LEVELS_PATH)
+	var source_levels_before_delete := FileAccess.get_file_as_string(LevelStore.SOURCE_PATH)
+	main.show_menu()
+	var delete_buttons: Array = main.content.find_children("", "Button", true, false).filter(func(node): return node.text == "Delete Progress")
+	check(delete_buttons.size() == 1 and delete_buttons[0].get_parent() == main.content.get_child(main.content.get_child_count() - 1), "A single Delete Progress button sits in the menu footer")
+	var saved_progress_before_delete := FileAccess.get_file_as_string(LevelStore.PROGRESS_PATH)
+	(delete_buttons[0] as Button).pressed.emit()
+	check(main.progress_delete_step == 1 and main.progress_delete_dialog.dialog_text == "Delete your puzzle progress?", "Deletion opens the first short confirmation")
+	main.progress_delete_dialog.get_cancel_button().pressed.emit()
+	check(main.progress_delete_dialog == null and FileAccess.get_file_as_string(LevelStore.PROGRESS_PATH) == saved_progress_before_delete, "Cancel at the first step preserves progress")
+	(delete_buttons[0] as Button).pressed.emit()
+	main.progress_delete_dialog.get_ok_button().pressed.emit()
+	await process_frame
+	check(main.progress_delete_step == 2 and main.progress_delete_dialog.dialog_text.contains("coins and purchased hints"), "The second confirmation names the other saved progress")
+	main.progress_delete_dialog.get_cancel_button().pressed.emit()
+	check(main.progress_delete_dialog == null and FileAccess.get_file_as_string(LevelStore.PROGRESS_PATH) == saved_progress_before_delete, "Cancel at the second step preserves progress")
+	(delete_buttons[0] as Button).pressed.emit()
+	main.progress_delete_dialog.get_ok_button().pressed.emit()
+	await process_frame
+	main.progress_delete_dialog.get_ok_button().pressed.emit()
+	await process_frame
+	check(main.progress_delete_step == 3 and main.progress_delete_dialog.dialog_text.contains("Final confirmation"), "A third confirmation is required before deletion")
+	main.progress_delete_dialog.get_cancel_button().pressed.emit()
+	check(main.progress_delete_dialog == null and FileAccess.get_file_as_string(LevelStore.PROGRESS_PATH) == saved_progress_before_delete, "Cancel at the final step preserves progress")
+	(delete_buttons[0] as Button).pressed.emit()
+	for confirmation in range(2):
+		main.progress_delete_dialog.get_ok_button().pressed.emit()
+		await process_frame
+	check(main.store.completed.size() == 3 and main.store.credits == 9 and main.store.hint_stage(2) == 2, "The first two confirmations never delete progress")
+	main.progress_delete_dialog.get_ok_button().pressed.emit()
+	check(main.progress_delete_dialog == null and main.screen == "menu" and main.menu_cards.size() == 5 and main.credit_label.text == "0", "The third confirmation resets progress and refreshes the menu")
+	var fresh_progress := LevelStore.new()
+	check(fresh_progress.completed.is_empty() and fresh_progress.hints.is_empty() and fresh_progress.credits == 0 and fresh_progress.unlocked_through == 0 and fresh_progress.menu_unlocked() == 5, "Deleted completions, hints, coins, and unlocks stay cleared after reload")
+	check(main.store.levels == retained_levels and main.store.colors == retained_colors and FileAccess.get_file_as_string(LevelStore.LEVELS_PATH) == saved_levels_before_delete and FileAccess.get_file_as_string(LevelStore.SOURCE_PATH) == source_levels_before_delete, "Deleting progress preserves saved puzzles and colors in memory and on disk")
 	print("%d checks, %d failures in %.2fs" % [checks, failures, (Time.get_ticks_msec() - started) / 1000.0])
 	quit(1 if failures else 0)
 

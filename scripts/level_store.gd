@@ -254,9 +254,29 @@ func set_completion_through(number: int) -> Error:
 
 func reset_completion_to_first() -> Error:
 	completed = {"1": true}
+	hints.clear()
 	unlocked_through = 0
 	credits = 1
 	return save_progress()
+
+func reset_all_progress() -> Error:
+	var previous_completed := completed.duplicate(true)
+	var previous_hints := hints.duplicate(true)
+	var previous_credits := credits
+	var previous_unlocked := unlocked_through
+	completed.clear()
+	hints.clear()
+	credits = 0
+	unlocked_through = 0
+	# An explicit empty record prevents a deleted save from importing old
+	# progress from the legacy game folders on the next launch.
+	var result := _atomic_write(PROGRESS_PATH, {"completed": {}, "unlocked_through": 0, "credits": 0, "hints": {}})
+	if result != OK:
+		completed = previous_completed
+		hints = previous_hints
+		credits = previous_credits
+		unlocked_through = previous_unlocked
+	return result
 
 func save_progress() -> Error:
 	unlocked_through = menu_unlocked()
