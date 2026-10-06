@@ -578,7 +578,9 @@ func run() -> void:
 	check(main.board.locked, "Solving locks input during celebration")
 	check(main.store.completed.get("2", false), "Solving marks completed")
 	check(main.store.credits == 2 and main.credit_label.text == "2", "A newly completed level awards a visible credit")
-	check(is_instance_valid(main.completed_badge) and main.completed_badge.is_visible_in_tree() and main.completed_badge.size == Vector2(72, 72) and main.completed_badge.position.x > main.size.x - 120, "Solving shows a large completion badge at the top right")
+	await process_frame
+	await process_frame
+	check(is_instance_valid(main.completed_badge) and main.completed_badge.is_visible_in_tree() and main.completed_badge.size == Vector2(72, 72) and main.completed_badge.get_global_rect().end.x <= main.credit_display.get_global_rect().position.x, "Solving shows a large completion badge to the left of the credits")
 	var celebration_text: Array = main.find_children("", "Label", true, false).map(func(node): return node.text)
 	check("Level 2 complete!" in celebration_text and celebration_text.any(func(line): return line.ends_with("!") and (line.trim_suffix("!") + ".") in CelebrationLines.LINES), "Celebration chooses a short exclamation")
 	var praise_labels: Array = main.find_children("", "Label", true, false).filter(func(node): return node.text.ends_with("!") and (node.text.trim_suffix("!") + ".") in CelebrationLines.LINES)
@@ -705,7 +707,7 @@ func run() -> void:
 	check(main.menu_rows.get_child_count() == 1 and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_BEGIN, "Menu rows align their cards from the left")
 	check(main.content.get_child(0) is HBoxContainer and main.credit_label.text == str(main.store.credits), "Credits replace Play beside the menu title")
 	check((main.content.get_child(0) as HBoxContainer).get_child(0).text == "H e a r t h l i n e", "Cozy menu title has spaced letters")
-	check((main.content.get_child(0) as HBoxContainer).get_child(2) == main.credit_display, "Menu credit display sits at the top right")
+	check((main.content.get_child(0) as HBoxContainer).get_child(2) == main.status_bar and main.credit_display.get_index() < main.settings_button.get_index(), "Menu credit display sits to the left of settings at the top right")
 	var thumbnail: TextureRect = level_cards[0].get_children().filter(func(node): return node is TextureRect)[0]
 	check(thumbnail.position == Vector2.ZERO and thumbnail.size == Vector2(64, 64), "Screenshot fills the whole menu button")
 	check(level_cards.all(func(card): return card.get_children().all(func(node): return not node is Label)), "Menu cards have no numbers or checkmarks")
@@ -883,7 +885,7 @@ func run() -> void:
 	key(main, KEY_M, true, false, true)
 	check(main.store.frontier() == 100 and main.store.completed.has("99"), "Shift+Z+M completes and unlocks the first 99 levels")
 	var menu_scroll: ScrollContainer = main.menu_scroll
-	check(main.menu_cards.size() == 105 and main.menu_columns <= 15 and main.menu_rows.get_child_count() == ceili(106.0 / main.menu_columns) and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_BEGIN and menu_scroll.vertical_scroll_mode == ScrollContainer.SCROLL_MODE_SHOW_ALWAYS, "Menu shows every unlocked group in one scrollable grid")
+	check(main.menu_cards.size() == 101 and main.menu_columns <= 15 and main.menu_rows.get_child_count() == ceili(101.0 / main.menu_columns) and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_BEGIN and menu_scroll.vertical_scroll_mode == ScrollContainer.SCROLL_MODE_SHOW_ALWAYS and main.menu_hint == null, "Menu ends at the victory card without promising further puzzles")
 	check(main.credit_label.text == str(main.store.credits), "Unlock shortcut refreshes the menu credits")
 	key(main, KEY_M, false, false, true)
 	key(main, KEY_Z, false, false, true)
@@ -977,8 +979,10 @@ func run() -> void:
 	var saved_levels_before_delete := FileAccess.get_file_as_string(LevelStore.LEVELS_PATH)
 	var source_levels_before_delete := FileAccess.get_file_as_string(LevelStore.SOURCE_PATH)
 	main.show_menu()
-	var delete_buttons: Array = main.content.find_children("", "Button", true, false).filter(func(node): return node.text == "Delete Progress")
-	check(delete_buttons.size() == 1 and delete_buttons[0].get_parent() == main.content.get_child(main.content.get_child_count() - 1), "A single Delete Progress button sits in the menu footer")
+	await create_timer(0.35).timeout
+	main._open_settings()
+	var delete_buttons: Array = main.settings_layer.find_children("", "Button", true, false).filter(func(node): return node.text == "Delete Progress")
+	check(delete_buttons.size() == 1 and main.content.find_children("", "Button", true, false).all(func(node): return node.text != "Delete Progress"), "A single Delete Progress button sits in settings instead of the menu footer")
 	var saved_progress_before_delete := FileAccess.get_file_as_string(LevelStore.PROGRESS_PATH)
 	(delete_buttons[0] as Button).pressed.emit()
 	check(main.progress_delete_step == 1 and main.progress_delete_dialog.dialog_text == "Delete your puzzle progress?", "Deletion opens the first short confirmation")

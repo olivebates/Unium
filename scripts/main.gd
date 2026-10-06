@@ -1,10 +1,16 @@
 extends Control
 
 const CelebrationLines = preload("res://scripts/celebration_lines.gd")
+const VictoryFireworks = preload("res://scripts/victory_fireworks.gd")
+const GameAudio = preload("res://scripts/game_audio.gd")
+const VICTORY_HEADING := "Congradulations on completing all the levels!"
+const VICTORY_MESSAGE := "If you want to see more, please shoot me a message on discord and I'll get right on it!\n"
+const VICTORY_DISCORD := "https://discord.gg/HENeTkyRPS"
 const RearrangeCard = preload("res://scripts/rearrange_card.gd")
 const MenuThumbnailJob = preload("res://scripts/menu_thumbnail_job.gd")
 const CompletedBadge = preload("res://scripts/completed_badge.gd")
 const CoinIcon = preload("res://scripts/coin_icon.gd")
+const CogIcon = preload("res://assets/cog.svg")
 const PuzzleSolver = preload("res://scripts/puzzle_solver.gd")
 const UnsolvedGlowShader = preload("res://assets/unsolved_glow.gdshader")
 const SCREEN_TRANSITION_DURATION := 0.2
@@ -21,6 +27,7 @@ const NO_SOLUTION_OUTLINE := Color("f05462")
 const MENU_MAX_COLUMNS := 15
 
 var store := LevelStore.new()
+var game_audio: Node
 var screen := "menu"
 var current_level := 1
 var board: PuzzleBoard
@@ -29,6 +36,10 @@ var completed_badge: Control
 var completion_layer: Control
 var credit_display: HBoxContainer
 var credit_label: Label
+var status_bar: HBoxContainer
+var settings_button: Button
+var settings_layer: Control
+var settings_board_locked := false
 var hint_button: Button
 var hint_stage := 0
 var hint_busy := false
@@ -131,6 +142,9 @@ var color_group_label: Label
 var color_paste_button: Button
 
 func _ready() -> void:
+	game_audio = GameAudio.new()
+	game_audio.name = "GameAudio"
+	add_child(game_audio)
 	RenderingServer.set_default_clear_color(BG)
 	shake_rng.randomize()
 	_build_theme()
@@ -144,7 +158,10 @@ func _ready() -> void:
 		_finish_screen_transition()
 		_update_menu_columns()
 	)
-	show_menu()
+	if store.completed.is_empty():
+		play_level(1)
+	else:
+		show_menu()
 
 func _update_menu_columns() -> void:
 	if not is_instance_valid(menu_rows):
@@ -367,11 +384,15 @@ func _restore_saved_menu() -> void:
 	menu_columns = saved_menu.columns
 	credit_display = saved_menu.credit_display
 	credit_label = saved_menu.credit_label
+	status_bar = saved_menu.status_bar
+	settings_button = saved_menu.settings_button
 	active_menu_signature = saved_menu.signature
 	saved_menu = {}
 	_update_menu_columns()
 	for card in menu_cards:
 		var number := int(card.get("level_number"))
+		if number == LevelStore.VICTORY_LEVEL:
+			continue
 		var cached: Dictionary = menu_thumbnail_cache.get(number, {})
 		if cached.get("signature") == _thumbnail_signature(number):
 			(card.get_child(0) as TextureRect).texture = cached.texture
@@ -480,6 +501,8 @@ func _start_screen_transition(outgoing: Control, kind: String, old_board: Puzzle
 	tween.finished.connect(_finish_screen_transition)
 
 func _shell(restore_menu: bool = false) -> void:
+	game_audio.set_music_active(screen != "menu")
+	_close_settings()
 	editor_solver = null
 	editor_solve_button = null
 	_finish_screen_transition()
@@ -501,7 +524,7 @@ func _shell(restore_menu: bool = false) -> void:
 	# each other's controls (or the retained menu) on every animation frame.
 	palette_theme = palette_theme.duplicate(true)
 	for child in get_children():
-		if child == held_shell or (not saved_menu.is_empty() and child == saved_menu.wrapper):
+		if child == game_audio or child == held_shell or (not saved_menu.is_empty() and child == saved_menu.wrapper):
 			continue
 		remove_child(child)
 		child.queue_free()
@@ -511,6 +534,8 @@ func _shell(restore_menu: bool = false) -> void:
 	completion_layer = null
 	credit_display = null
 	credit_label = null
+	status_bar = null
+	settings_button = null
 	hint_button = null
 	hint_stage = 0
 	hint_busy = false
@@ -550,19 +575,22 @@ func _shell(restore_menu: bool = false) -> void:
 	margins.add_child(content)
 	if screen == "menu":
 		var header := HBoxContainer.new()
+		header.custom_minimum_size.y = 64
 		content.add_child(header)
 		header.add_child(label("H e a r t h l i n e", 28))
 		spacer(header)
-		credit_display = _credits_widget()
-		header.add_child(credit_display)
+		header.add_child(_create_status_bar())
 		var separator := HSeparator.new()
 		separator.modulate = Color(1, 1, 1, 0.16)
 		content.add_child(separator)
+	else:
+		active_shell.add_child(_create_status_bar())
+		_position_play_credits()
 
 func show_menu() -> void:
 	_finish_screen_transition()
 	var old_board := board
-	var outgoing: Control = _take_outgoing_shell() if screen == "play" and is_instance_valid(board) else null
+	var outgoing: Control = _take_outgoing_shell() if screen == "play" and is_instance_valid(active_shell) else null
 	screen = "menu"
 	color_mode = false
 	var restore_menu: bool = not rearrange_mode and not saved_menu.is_empty() and saved_menu.signature == _menu_signature()
@@ -606,32 +634,29 @@ func show_menu() -> void:
 	var visible_levels := store.menu_levels()
 	for number in visible_levels:
 		menu_cards.append(_level_card(number))
-	menu_hint = _locked_group_hint()
+	if store.menu_unlocked() < LevelStore.VICTORY_LEVEL:
+		menu_hint = _locked_group_hint()
 	_update_menu_columns()
 	active_menu_signature = _menu_signature()
 	scroll.set_deferred("scroll_vertical", menu_scroll_position)
-	if not rearrange_mode:
-		var footer := HBoxContainer.new()
-		content.add_child(footer)
-		footer.add_child(_delete_progress_button())
-		spacer(footer)
 	if outgoing:
 		_start_screen_transition(outgoing, "close", old_board)
 
 func _delete_progress_button() -> Button:
 	var delete_button := button("Delete Progress", _begin_delete_progress)
 	delete_button.focus_mode = Control.FOCUS_NONE
+	delete_button.add_theme_font_size_override("font_size", 14)
 	for state in ["normal", "hover", "pressed"]:
 		var fill := Color("842a32")
 		if state == "hover":
 			fill = Color("a93641")
 		elif state == "pressed":
 			fill = Color("682027")
-		var style := box(fill, 12)
-		style.content_margin_left = 20
-		style.content_margin_right = 20
-		style.content_margin_top = 12
-		style.content_margin_bottom = 12
+		var style := box(fill, 8)
+		style.content_margin_left = 10
+		style.content_margin_right = 10
+		style.content_margin_top = 8
+		style.content_margin_bottom = 8
 		delete_button.add_theme_stylebox_override(state, style)
 	delete_button.add_theme_color_override("font_color", Color.WHITE)
 	delete_button.add_theme_color_override("font_hover_color", Color.WHITE)
@@ -639,7 +664,7 @@ func _delete_progress_button() -> Button:
 	return delete_button
 
 func _begin_delete_progress() -> void:
-	if screen != "menu" or rearrange_mode or is_instance_valid(progress_delete_dialog):
+	if not is_instance_valid(settings_layer) or is_instance_valid(progress_delete_dialog):
 		return
 	progress_delete_step = 1
 	progress_delete_dialog = ConfirmationDialog.new()
@@ -649,7 +674,7 @@ func _begin_delete_progress() -> void:
 	_show_delete_progress_step()
 
 func _show_delete_progress_step() -> void:
-	if not is_instance_valid(progress_delete_dialog) or screen != "menu":
+	if not is_instance_valid(progress_delete_dialog):
 		return
 	var prompts := [
 		"Delete your puzzle progress?",
@@ -662,7 +687,7 @@ func _show_delete_progress_step() -> void:
 	progress_delete_dialog.popup_centered(Vector2i(460, 180))
 
 func _advance_delete_progress() -> void:
-	if not is_instance_valid(progress_delete_dialog) or screen != "menu":
+	if not is_instance_valid(progress_delete_dialog):
 		return
 	if progress_delete_step < 3:
 		progress_delete_step += 1
@@ -675,6 +700,7 @@ func _advance_delete_progress() -> void:
 		return
 	menu_scroll_position = 0
 	menu_hovered_level = 0
+	rearrange_mode = false
 	show_menu()
 
 func _cancel_delete_progress() -> void:
@@ -761,9 +787,10 @@ func _shake_screen() -> void:
 func _level_card(number: int) -> Button:
 	var card := RearrangeCard.new()
 	card.level_number = number
-	card.rearranging = rearrange_mode
-	card.mouse_default_cursor_shape = Control.CURSOR_MOVE if rearrange_mode else Control.CURSOR_POINTING_HAND
-	if rearrange_mode:
+	var victory := number == LevelStore.VICTORY_LEVEL
+	card.rearranging = rearrange_mode and not victory
+	card.mouse_default_cursor_shape = Control.CURSOR_MOVE if card.rearranging else Control.CURSOR_POINTING_HAND
+	if card.rearranging:
 		card.drag_pressed.connect(_start_menu_drag)
 	else:
 		card.pressed.connect(func(): _on_menu_card_pressed(number))
@@ -788,6 +815,25 @@ func _level_card(number: int) -> Button:
 	preview.stretch_mode = TextureRect.STRETCH_SCALE
 	preview.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	card.add_child(preview)
+	if victory:
+		card.tooltip_text = "Level 101 — Victory!"
+		var star := label("✦", 40)
+		star.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		star.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		star.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		star.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		star.add_theme_color_override("font_color", COMPLETED_CARD_OUTLINE)
+		card.add_child(star)
+		var victory_outline := Panel.new()
+		victory_outline.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		victory_outline.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var victory_style := box(Color(0.04, 0.1, 0.08, 0.5), 9)
+		victory_style.border_color = COMPLETED_CARD_OUTLINE
+		victory_style.set_border_width_all(2)
+		victory_outline.add_theme_stylebox_override("panel", victory_style)
+		card.add_child(victory_outline)
+		card.move_child(victory_outline, 1)
+		return card
 	var completed: bool = store.completed.get(str(number), false)
 	var signature := _thumbnail_signature(number)
 	var cached: Dictionary = menu_thumbnail_cache.get(number, {})
@@ -838,7 +884,7 @@ func _thumbnail_signature(number: int) -> int:
 	return hash([number, store.levels.get(str(number), {}), store.get_color(number).to_html()])
 
 func _select_menu_level(number: int) -> void:
-	if store.levels.has(str(number)) or store.cache.has(number):
+	if number == LevelStore.VICTORY_LEVEL or store.levels.has(str(number)) or store.cache.has(number):
 		play_level(number)
 	else:
 		pending_menu_level = number
@@ -1046,6 +1092,7 @@ func _rearrange_level(source: int, target: int, after: bool) -> void:
 	show_menu()
 
 func play_level(number: int, restore: Array = [], navigation_direction: int = 0) -> void:
+	number = clampi(number, 1, LevelStore.VICTORY_LEVEL)
 	_finish_screen_transition()
 	var old_screen := screen
 	var old_number := current_level
@@ -1061,7 +1108,7 @@ func play_level(number: int, restore: Array = [], navigation_direction: int = 0)
 	var outgoing: Control = _take_outgoing_shell() if (screen == "menu" or (screen == "play" and number != current_level)) and is_instance_valid(content) else null
 	var retained_menu: Dictionary = {}
 	if outgoing and old_screen == "menu" and not rearrange_mode:
-		retained_menu = {"wrapper": outgoing, "signature": active_menu_signature, "content": content, "rows": menu_rows, "cards": menu_cards.duplicate(), "hint": menu_hint, "scroll": menu_scroll, "columns": menu_columns, "credit_display": credit_display, "credit_label": credit_label}
+		retained_menu = {"wrapper": outgoing, "signature": active_menu_signature, "content": content, "rows": menu_rows, "cards": menu_cards.duplicate(), "hint": menu_hint, "scroll": menu_scroll, "columns": menu_columns, "credit_display": credit_display, "credit_label": credit_label, "status_bar": status_bar, "settings_button": settings_button}
 	var previous_text := palette_text
 	var previous_button := palette_button
 	var previous_level := -1
@@ -1077,6 +1124,16 @@ func play_level(number: int, restore: Array = [], navigation_direction: int = 0)
 	screen = "play"
 	color_mode = false
 	_shell()
+	if number == LevelStore.VICTORY_LEVEL:
+		_show_victory_screen()
+		background_rect.color = previous_background
+		background_tween = create_tween()
+		background_tween.tween_property(background_rect, "color", BG, fade_duration)
+		if outgoing:
+			outgoing_menu = retained_menu
+			var direction := navigation_direction if navigation_direction != 0 else (1 if number > old_number else -1)
+			_start_screen_transition(outgoing, "open" if old_screen == "menu" else "slide", old_board, card_rect, source_card, direction)
+		return
 	var level := store.get_level(number)
 	content.add_child(label("Level %d" % number, 38))
 	_show_completed_badge()
@@ -1097,6 +1154,8 @@ func play_level(number: int, restore: Array = [], navigation_direction: int = 0)
 	board.path = restore.duplicate()
 	board.refresh()
 	board.solved.connect(_complete_level)
+	board.line_tile_added.connect(game_audio.play_click)
+	board.line_tile_removed.connect(game_audio.play_place)
 	var controls := HBoxContainer.new()
 	controls.add_theme_constant_override("separation", 4)
 	content.add_child(controls)
@@ -1129,6 +1188,54 @@ func play_level(number: int, restore: Array = [], navigation_direction: int = 0)
 		var direction := navigation_direction if navigation_direction != 0 else (1 if number > old_number else -1)
 		_start_screen_transition(outgoing, "open" if old_screen == "menu" else "slide", old_board, card_rect, source_card, direction)
 
+func _show_victory_screen() -> void:
+	var fireworks := VictoryFireworks.new()
+	fireworks.name = "VictoryFireworks"
+	fireworks.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	active_shell.add_child(fireworks)
+	active_shell.move_child(fireworks, 0)
+	var center := CenterContainer.new()
+	center.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	content.add_child(center)
+	var panel := PanelContainer.new()
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.custom_minimum_size.x = minf(780.0, size.x - 88.0)
+	center.resized.connect(func(): panel.custom_minimum_size.x = minf(780.0, center.size.x))
+	panel.add_theme_stylebox_override("panel", box(Color(0.025, 0.04, 0.06, 0.72), 24))
+	center.add_child(panel)
+	var padding := MarginContainer.new()
+	for side in ["left", "right", "top", "bottom"]:
+		padding.add_theme_constant_override("margin_" + side, 32)
+	panel.add_child(padding)
+	var message := VBoxContainer.new()
+	message.add_theme_constant_override("separation", 28)
+	padding.add_child(message)
+	var heading := label(VICTORY_HEADING, 36)
+	heading.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	heading.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	heading.add_theme_color_override("font_color", TEXT)
+	message.add_child(heading)
+	var body := RichTextLabel.new()
+	body.name = "VictoryMessage"
+	body.bbcode_enabled = true
+	body.fit_content = true
+	body.scroll_active = false
+	body.text = "[center]%s\n[url=%s]%s[/url][/center]" % [VICTORY_MESSAGE, VICTORY_DISCORD, VICTORY_DISCORD]
+	body.add_theme_font_size_override("normal_font_size", 22)
+	body.add_theme_color_override("default_color", TEXT)
+	body.meta_clicked.connect(_open_victory_link)
+	message.add_child(body)
+	var controls := HBoxContainer.new()
+	controls.add_theme_constant_override("separation", 12)
+	content.add_child(controls)
+	controls.add_child(button("Back to Puzzle Selection", _return_to_menu, true))
+	spacer(controls)
+	controls.add_child(button("← Previous puzzle", func(): _open_adjacent_level(-1)))
+
+func _open_victory_link(url: Variant) -> void:
+	if str(url) == VICTORY_DISCORD:
+		OS.shell_open(VICTORY_DISCORD)
+
 func _open_adjacent_level(direction: int) -> void:
 	if direction > 0 and current_level >= store.menu_unlocked():
 		_show_locked_feedback(get_global_mouse_position())
@@ -1141,12 +1248,8 @@ func _show_completed_badge() -> void:
 	if screen != "play" or not store.completed.get(str(current_level), false) or is_instance_valid(completed_badge):
 		return
 	completed_badge = CompletedBadge.new()
-	active_shell.add_child(completed_badge)
-	completed_badge.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-	completed_badge.offset_left = -116
-	completed_badge.offset_right = -44
-	completed_badge.offset_top = 20
-	completed_badge.offset_bottom = 92
+	status_bar.add_child(completed_badge)
+	status_bar.move_child(completed_badge, 0)
 	_position_play_credits()
 
 func _credits_widget() -> HBoxContainer:
@@ -1155,23 +1258,124 @@ func _credits_widget() -> HBoxContainer:
 	var icon := CoinIcon.new()
 	display.add_child(icon)
 	credit_label = label(str(store.credits), 24)
+	credit_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	display.add_child(credit_label)
 	return display
 
 func _show_play_credits() -> void:
-	credit_display = _credits_widget()
-	active_shell.add_child(credit_display)
 	_position_play_credits()
 
 func _position_play_credits() -> void:
-	if not is_instance_valid(credit_display) or screen != "play":
+	if not is_instance_valid(status_bar) or screen == "menu":
 		return
-	var right := -132 if is_instance_valid(completed_badge) else -44
-	credit_display.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-	credit_display.offset_left = right - 120
-	credit_display.offset_right = right
-	credit_display.offset_top = 34
-	credit_display.offset_bottom = 72
+	status_bar.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	status_bar.offset_left = -44 - status_bar.get_combined_minimum_size().x
+	status_bar.offset_right = -44
+	status_bar.offset_top = 20
+	status_bar.offset_bottom = 92
+
+func _create_status_bar() -> HBoxContainer:
+	status_bar = HBoxContainer.new()
+	status_bar.name = "ScreenStatus"
+	status_bar.add_theme_constant_override("separation", 16)
+	credit_display = _credits_widget()
+	status_bar.add_child(credit_display)
+	settings_button = button("", _open_settings)
+	settings_button.name = "SettingsButton"
+	settings_button.tooltip_text = "Settings"
+	settings_button.icon = CogIcon
+	settings_button.add_theme_constant_override("icon_max_width", 28)
+	settings_button.custom_minimum_size = Vector2(48, 48)
+	settings_button.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	status_bar.add_child(settings_button)
+	status_bar.minimum_size_changed.connect(_position_play_credits)
+	return status_bar
+
+func _open_settings() -> void:
+	if is_instance_valid(settings_layer) or is_instance_valid(screen_transition):
+		return
+	pending_menu_level = 0
+	if is_instance_valid(board):
+		board._end()
+		board._end_light()
+		settings_board_locked = board.locked
+		board.locked = true
+		board.set_process_input(false)
+	settings_layer = Control.new()
+	settings_layer.name = "Settings"
+	settings_layer.theme = palette_theme
+	settings_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	settings_layer.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(settings_layer)
+	var veil := ColorRect.new()
+	veil.color = Color(0, 0, 0, 0.78)
+	veil.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	settings_layer.add_child(veil)
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	settings_layer.add_child(center)
+	var panel := PanelContainer.new()
+	var style := box(PANEL, 22)
+	style.content_margin_left = 32
+	style.content_margin_right = 32
+	style.content_margin_top = 28
+	style.content_margin_bottom = 28
+	panel.add_theme_stylebox_override("panel", style)
+	center.add_child(panel)
+	var controls := VBoxContainer.new()
+	controls.custom_minimum_size.x = 380
+	controls.add_theme_constant_override("separation", 24)
+	panel.add_child(controls)
+	controls.add_child(label("Settings", 32))
+	_add_volume_control(controls, "Music", game_audio.music_volume, game_audio.set_music_volume)
+	_add_volume_control(controls, "Sound effects", game_audio.sfx_volume, game_audio.set_sfx_volume)
+	var separator := HSeparator.new()
+	separator.modulate.a = 0.25
+	controls.add_child(separator)
+	var footer := HBoxContainer.new()
+	controls.add_child(footer)
+	var delete_button := _delete_progress_button()
+	delete_button.size_flags_vertical = Control.SIZE_SHRINK_END
+	footer.add_child(delete_button)
+	spacer(footer)
+	var done := button("Done", _close_settings, true)
+	footer.add_child(done)
+	done.grab_focus()
+
+func _add_volume_control(parent: Control, title: String, value: float, update_volume: Callable) -> void:
+	var group := VBoxContainer.new()
+	group.add_theme_constant_override("separation", 10)
+	parent.add_child(group)
+	var row := HBoxContainer.new()
+	group.add_child(row)
+	row.add_child(label(title, 20))
+	spacer(row)
+	var percentage := label("%d%%" % roundi(value * 100), 20)
+	row.add_child(percentage)
+	var slider := HSlider.new()
+	slider.name = "MusicVolume" if title == "Music" else "SfxVolume"
+	slider.min_value = 0
+	slider.max_value = 100
+	slider.step = 1
+	slider.value = value * 100
+	slider.custom_minimum_size.y = 28
+	group.add_child(slider)
+	slider.value_changed.connect(func(percent: float):
+		percentage.text = "%d%%" % roundi(percent)
+		update_volume.call(percent / 100.0)
+	)
+
+func _close_settings() -> void:
+	if not is_instance_valid(settings_layer):
+		return
+	_cancel_delete_progress()
+	remove_child(settings_layer)
+	settings_layer.queue_free()
+	settings_layer = null
+	if is_instance_valid(board):
+		board.locked = settings_board_locked
+		board.set_process_input(true)
 
 func _update_credits_display() -> void:
 	if is_instance_valid(credit_label):
@@ -1281,8 +1485,9 @@ func _animate_level_background(previous: Color, target: Color, duration: float =
 	background_tween.tween_property(panel_style, "bg_color", target, duration).set_trans(Tween.TRANS_SINE)
 
 func _complete_level() -> void:
-	if is_instance_valid(completion_layer):
+	if current_level == LevelStore.VICTORY_LEVEL or is_instance_valid(completion_layer):
 		return
+	game_audio.play_victory()
 	var previously_unlocked := store.menu_unlocked()
 	var result := store.mark_complete(current_level)
 	var now_unlocked := store.menu_unlocked()
@@ -1370,8 +1575,14 @@ func _input(event: InputEvent) -> void:
 			_cancel_delete_progress()
 			get_viewport().set_input_as_handled()
 			return
+		if is_instance_valid(settings_layer):
+			_close_settings()
+			get_viewport().set_input_as_handled()
+			return
 		_return_to_menu()
 		get_viewport().set_input_as_handled()
+		return
+	if is_instance_valid(settings_layer):
 		return
 	var only_editor_keys := _only_keys([KEY_SHIFT, KEY_Z, KEY_O])
 	var only_color_keys := _only_keys([KEY_SHIFT, KEY_Z, KEY_I])
@@ -1503,16 +1714,18 @@ func _show_editor() -> void:
 	_shell()
 	var title_row := HBoxContainer.new()
 	content.add_child(title_row)
-	title_row.add_child(label("Level workshop", 34))
+	var title_group := VBoxContainer.new()
+	title_row.add_child(title_group)
+	title_group.add_child(label("Level workshop", 34))
 	spacer(title_row)
 	var title_hints := VBoxContainer.new()
 	title_hints.alignment = BoxContainer.ALIGNMENT_CENTER
-	title_row.add_child(title_hints)
+	title_group.add_child(title_hints)
 	editor_mode_hint = label("BUILD MODE · SPACE TO PLAYTEST", 12, ACCENT)
-	editor_mode_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	editor_mode_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	title_hints.add_child(editor_mode_hint)
 	var leave_hint := label("SHIFT + Z + O TO RETURN", 12, MUTED)
-	leave_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	leave_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	title_hints.add_child(leave_hint)
 	var workspace := HBoxContainer.new()
 	workspace.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -1528,6 +1741,8 @@ func _show_editor() -> void:
 	panel.add_child(board)
 	board.configure(editor_data, store.get_color(editor_level), store.get_line_color(editor_level))
 	board.solved.connect(_editor_playtest_solved)
+	board.line_tile_added.connect(game_audio.play_click)
+	board.line_tile_removed.connect(game_audio.play_place)
 	board.paint_started.connect(func(): stroke_before = editor_data.duplicate(true))
 	board.cell_painted.connect(_paint_cell)
 	board.light_painted.connect(_paint_light_cell)
@@ -1658,7 +1873,7 @@ func _toggle_editor_playtest() -> void:
 	board._end_light()
 	_finish_stroke()
 	editor_playtesting = not editor_playtesting
-	board.clear_path()
+	board.clear_path(false)
 	board.editing = not editor_playtesting
 	_set_editor_tools_enabled(not editor_playtesting)
 	if editor_playtesting:

@@ -25,6 +25,8 @@ func capture(filename: String) -> void:
 
 func run() -> void:
 	var main = load("res://main.tscn").instantiate()
+	# This suite measures a cold menu rather than first-player startup.
+	main.store.completed = {"1": true}
 	root.add_child(main)
 	main.store.mirror_project = false
 	main.store.completed.clear()
@@ -36,14 +38,14 @@ func run() -> void:
 		main.store.levels.clear()
 		main.store.cache.clear()
 	else:
-		for number in range(1, 106):
+		for number in range(1, 101):
 			main.store.levels[str(number)] = layout.duplicate(true)
 	var started := Time.get_ticks_usec()
 	main.show_menu()
 	var cold_ms := (Time.get_ticks_usec() - started) / 1000.0
 	check(main.find_children("", "SubViewport", true, false).is_empty(), "The menu creates no thumbnail viewports or physics worlds")
 	check(main.find_children("", "PuzzleBoard", true, false).is_empty(), "The menu creates no live puzzle boards")
-	check(main.menu_thumbnail_queue.size() == 105, "Thumbnail preparation is deferred instead of blocking menu construction")
+	check(main.menu_thumbnail_queue.size() == 100, "Puzzle thumbnails are deferred and the victory card needs no puzzle generation")
 	var frame_times: Array[float] = []
 	var last := Time.get_ticks_usec()
 	var deadline := last + 60000000
@@ -54,7 +56,7 @@ func run() -> void:
 		last = now
 		if now > deadline:
 			break
-	check(main.menu_cards.all(func(card): return (card.get_child(0) as TextureRect).texture != null), "All thumbnails finish without GPU readback")
+	check(main.menu_cards.filter(func(card): return card.level_number != LevelStore.VICTORY_LEVEL).all(func(card): return (card.get_child(0) as TextureRect).texture != null), "All puzzle thumbnails finish without GPU readback")
 	started = Time.get_ticks_usec()
 	main.show_menu()
 	var warm_ms := (Time.get_ticks_usec() - started) / 1000.0
@@ -101,16 +103,17 @@ func run() -> void:
 	check(main.current_level == 2 and main.transition_old_board.position.x > main.board.position.x and main.transition_old_shell.position.x == 0.0 and main.transition_new_shell.position.x == 0.0, "Backward navigation slides the puzzle while buttons stay fixed")
 	await capture("transition-backward")
 	await create_timer(0.25).timeout
-	main.play_level(105)
+	main.store.unlocked_through = 100
+	main.play_level(100)
 	await create_timer(0.3).timeout
 	main._open_adjacent_level(1)
 	await settle()
 	await create_timer(0.06).timeout
-	check(main.current_level == 105 and main.screen_shake_tween.is_running() and not is_instance_valid(main.screen_transition), "Next at the last unlocked puzzle shakes instead of wrapping")
+	check(main.current_level == 100 and main.screen_shake_tween.is_running() and not is_instance_valid(main.screen_transition), "Next at the last unlocked puzzle shakes instead of wrapping")
 	main._open_adjacent_level(-1)
 	await settle()
 	await create_timer(0.06).timeout
-	check(main.current_level == 104 and main.transition_old_board.position.x > main.board.position.x, "Previous visits the preceding puzzle")
+	check(main.current_level == 99 and main.transition_old_board.position.x > main.board.position.x, "Previous visits the preceding puzzle")
 	main.size = Vector2(1120, 680)
 	main.show_menu()
 	await create_timer(0.3).timeout
@@ -128,19 +131,19 @@ func run() -> void:
 	var expected_outline: Color = main.COMPLETED_CARD_OUTLINE if "--generated" in OS.get_cmdline_user_args() else main.NO_SOLUTION_OUTLINE
 	check((completed_outline.get_theme_stylebox("panel") as StyleBoxFlat).border_color == expected_outline and (completed_card.get_child(0) as TextureRect).modulate == Color.WHITE, "Changed completion uses the known-solution status and retains puzzle preview colors")
 	main.store.unlocked_through = 110
-	main.store.levels.erase("106")
-	main.store.cache.erase(106)
+	main.store.levels.erase("100")
+	main.store.cache.erase(100)
 	main.show_menu()
-	main._select_menu_level(106)
+	main._select_menu_level(100)
 	check(main.screen == "menu", "Selecting an uncached generated puzzle leaves the menu responsive while it loads")
 	main._return_to_menu()
 	check(main.pending_menu_level == 0 and main.screen == "menu", "Escape cancels a pending puzzle selection")
-	main._select_menu_level(106)
+	main._select_menu_level(100)
 	deadline = Time.get_ticks_usec() + 15000000
 	while main.screen == "menu" and Time.get_ticks_usec() < deadline:
 		await process_frame
-	check(main.screen == "play" and main.current_level == 106, "A generated puzzle opens once background preparation finishes")
+	check(main.screen == "play" and main.current_level == 100, "A generated puzzle opens once background preparation finishes")
 	frame_times.sort()
-	print("105-card menu: build %.2f ms, cached rebuild %.2f ms, retained return %.2f ms, preparation frame p95 %.2f ms, worst %.2f ms" % [cold_ms, warm_ms, return_ms, frame_times[int(frame_times.size() * 0.95)], frame_times[-1]])
+	print("101-card menu: build %.2f ms, cached rebuild %.2f ms, retained return %.2f ms, preparation frame p95 %.2f ms, worst %.2f ms" % [cold_ms, warm_ms, return_ms, frame_times[int(frame_times.size() * 0.95)], frame_times[-1]])
 	print("Menu/transition checks: %d, failures: %d" % [checks, failures])
 	quit(1 if failures else 0)

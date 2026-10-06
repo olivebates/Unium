@@ -7,6 +7,7 @@ const PROGRESS_PATH := "user://progress.json"
 const DEFAULT_LINE_COLOR := Color("eae345")
 const GROUP_SIZE := 5
 const GROUP_COMPLETIONS_REQUIRED := 3
+const VICTORY_LEVEL := 101
 const PREVIOUS_USER_FOLDERS := ["Godot/app_userdata/Unium", "Godot/app_userdata/Afterglow", "Godot/app_userdata/Glimmer", "Godot/app_userdata/Strike-through"]
 
 var levels: Dictionary = {}
@@ -139,6 +140,8 @@ func get_level(number: int) -> Dictionary:
 	return cache[number].duplicate(true)
 
 func has_solution(number: int) -> bool:
+	if number == VICTORY_LEVEL:
+		return false
 	var key := str(number)
 	return not levels.has(key) or _valid_solution_endpoints(levels[key])
 
@@ -168,9 +171,9 @@ func frontier() -> int:
 
 func menu_unlocked() -> int:
 	var last := group_start(maxi(1, unlocked_through)) + GROUP_SIZE - 1
-	while _completed_in_group(last - GROUP_SIZE + 1) >= GROUP_COMPLETIONS_REQUIRED:
+	while last < VICTORY_LEVEL and _completed_in_group(last - GROUP_SIZE + 1) >= GROUP_COMPLETIONS_REQUIRED:
 		last += GROUP_SIZE
-	return last
+	return mini(last, VICTORY_LEVEL)
 
 func _completed_in_group(first: int) -> int:
 	var count := 0
@@ -198,6 +201,8 @@ func adjacent_level(current: int, direction: int) -> int:
 	return posmod(current - 1 + direction, last) + 1
 
 func mark_complete(number: int) -> Error:
+	if number == VICTORY_LEVEL:
+		return ERR_UNAVAILABLE
 	if not completed.get(str(number), false):
 		completed[str(number)] = true
 		credits += 1
@@ -220,7 +225,7 @@ func hint_cost(number: int) -> int:
 
 func purchase_hint(number: int) -> Error:
 	var cost := hint_cost(number)
-	if number < 1 or credits < cost or hint_stage(number) >= 2:
+	if number < 1 or number == VICTORY_LEVEL or credits < cost or hint_stage(number) >= 2:
 		return ERR_UNAVAILABLE
 	var key := str(number)
 	var previous := hint_stage(number)
@@ -236,7 +241,7 @@ func purchase_hint(number: int) -> Error:
 	return result
 
 func complete_first(number: int) -> Error:
-	for level in range(1, number + 1):
+	for level in range(1, mini(number, VICTORY_LEVEL - 1) + 1):
 		if not completed.get(str(level), false):
 			completed[str(level)] = true
 			credits += 1
@@ -245,6 +250,7 @@ func complete_first(number: int) -> Error:
 func set_completion_through(number: int) -> Error:
 	if number < 1:
 		return ERR_INVALID_PARAMETER
+	number = mini(number, VICTORY_LEVEL - 1)
 	completed.clear()
 	for level in range(1, number + 1):
 		completed[str(level)] = true
@@ -359,6 +365,8 @@ func delete_level(number: int) -> Error:
 	return _save_shifted_levels(previous_levels, previous_completed, previous_hints)
 
 func rearrange_level(source: int, target: int, action: String, after: bool = false) -> Error:
+	if source == VICTORY_LEVEL or target == VICTORY_LEVEL:
+		return ERR_INVALID_PARAMETER
 	var visible := menu_levels()
 	if source not in visible or target not in visible or source == target:
 		return ERR_INVALID_PARAMETER

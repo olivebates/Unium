@@ -1,8 +1,8 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene format=3 uid="uid://dbkmbbld18dc4"]
 
-[ext_resource type="Script" path="res://scripts/main.gd" id="1"]
+[ext_resource type="Script" uid="uid://cugq8fglgqaao" path="res://scripts/main.gd" id="1"]
 
-[node name="Hearthline" type="Control"]
+[node name="Hearthline" type="Control" unique_id=1977870180]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0

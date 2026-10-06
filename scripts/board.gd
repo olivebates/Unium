@@ -9,6 +9,8 @@ const MOVE_DURATION := 0.2
 const TileCanvas = preload("res://scripts/board_tiles.gd")
 
 signal path_changed
+signal line_tile_added(cell: int)
+signal line_tile_removed(cell: int)
 signal solved
 signal paint_started
 signal cell_painted(cell: int)
@@ -497,6 +499,7 @@ func _begin(point: Vector2) -> void:
 	elif path.is_empty():
 		dragging = true
 		path.append(cell)
+		line_tile_added.emit(cell)
 		_changed()
 	else:
 		if cell == path.front():
@@ -506,7 +509,8 @@ func _begin(point: Vector2) -> void:
 		if visit >= 0:
 			dragging = true
 			if visit < path.size() - 1:
-				path.resize(visit + 1)
+				while path.size() > visit + 1:
+					_remove_last_tile()
 				_changed()
 
 func _begin_light(point: Vector2) -> void:
@@ -572,9 +576,10 @@ func _trace_toward(target: int) -> void:
 			var next_position: Vector2i = end_position + direction
 			var next_cell := next_position.y * width + next_position.x
 			if path.size() >= 2 and next_cell == path[-2]:
-				path.pop_back()
+				_remove_last_tile()
 			elif Puzzle.can_append(path, next_cell, width, height):
 				path.append(next_cell)
+				line_tile_added.emit(next_cell)
 			else:
 				continue
 			last_axis = axis
@@ -606,8 +611,16 @@ func _changed() -> void:
 		dragging = false
 		solved.emit()
 
-func clear_path() -> void:
-	path.clear()
+func _remove_last_tile() -> void:
+	var cell: int = path.pop_back()
+	line_tile_removed.emit(cell)
+
+func clear_path(play_sound: bool = true) -> void:
+	if play_sound and not editing:
+		while not path.is_empty():
+			_remove_last_tile()
+	else:
+		path.clear()
 	dragging = false
 	locked = false
 	refresh(true)
