@@ -4,6 +4,8 @@ A native Godot 4.7 puzzle game that scales its board to the display, including f
 
 ## Play
 
+The UI keeps Godot's default font for regular text, including ASCII, and bundles `NotoColorEmoji-Regular.ttf` plus Noto Sans Math and Noto Sans Symbols 2 as fallbacks. This lets emoji and the game's arrows, reset symbol, and stars render in Web exports without access to system fonts. Font licenses are included in `assets/fonts/`.
+
 - With no completed levels, the game starts directly on level 1. Once you have beaten any level, future launches open puzzle selection. **All puzzles** remains available from level 1.
 - Drag through adjacent tiles to draw one continuous line. Entering a colored tile flips it between light and dark. Gray tiles never change and do not need to be cleared.
 - Cross an existing straight section at a right angle and continue straight through it. The starting tile can also be crossed at a right angle to the line's first step, but cannot be entered from behind. Corners and tiles already visited twice cannot be crossed. A light tile at a crossed start or endpoint counts as light when checking for a win.
@@ -27,6 +29,8 @@ Automatic puzzles start on a canvas with independently chosen width and height o
 ## Editors
 
 Hold all keys in a shortcut together; extra modifiers do not activate it.
+
+Debug and editor keyboard commands are disabled in HTML5 / Web builds. Escape remains available for menus and settings.
 
 | Shortcut | Action |
 | --- | --- |

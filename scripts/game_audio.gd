@@ -46,7 +46,8 @@ func _ready() -> void:
 
 func _ensure_bus(bus_name: String) -> void:
 	if AudioServer.get_bus_index(bus_name) < 0:
-		AudioServer.add_bus()
+		# Growing the bus count avoids add_bus(-1) misrouting Web sample audio.
+		AudioServer.bus_count += 1
 		var index := AudioServer.bus_count - 1
 		AudioServer.set_bus_name(index, bus_name)
 		AudioServer.set_bus_send(index, "Master")

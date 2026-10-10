@@ -191,6 +191,15 @@ func _update_menu_columns() -> void:
 
 func _build_theme() -> void:
 	var theme_resource := Theme.new()
+	# Web builds cannot use system fonts for missing symbols or emoji glyphs.
+	var ui_font := FontVariation.new()
+	ui_font.base_font = ThemeDB.fallback_font
+	ui_font.fallbacks = [
+		preload("res://NotoColorEmoji-Regular.ttf"),
+		preload("res://assets/fonts/NotoSansMath-Regular.ttf"),
+		preload("res://assets/fonts/NotoSansSymbols2-Regular.ttf"),
+	]
+	theme_resource.default_font = ui_font
 	theme_resource.default_font_size = 16
 	theme_resource.set_type_variation("PrimaryButton", "Button")
 	theme_resource.set_color("font_color", "Label", TEXT)
@@ -646,6 +655,8 @@ func _delete_progress_button() -> Button:
 	var delete_button := button("Delete Progress", _begin_delete_progress)
 	delete_button.focus_mode = Control.FOCUS_NONE
 	delete_button.add_theme_font_size_override("font_size", 14)
+	# Keep this compact text-only button's original height despite taller fallback fonts.
+	delete_button.add_theme_font_override("font", ThemeDB.fallback_font)
 	for state in ["normal", "hover", "pressed"]:
 		var fill := Color("842a32")
 		if state == "hover":
@@ -892,7 +903,7 @@ func _select_menu_level(number: int) -> void:
 		menu_thumbnail_queue.push_front(number)
 
 func _on_menu_card_pressed(number: int) -> void:
-	if screen == "menu" and pressed_keys.has(KEY_SHIFT) and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_B) and _only_keys([KEY_SHIFT, KEY_Z, KEY_B]):
+	if not OS.has_feature("web") and screen == "menu" and pressed_keys.has(KEY_SHIFT) and pressed_keys.has(KEY_Z) and pressed_keys.has(KEY_B) and _only_keys([KEY_SHIFT, KEY_Z, KEY_B]):
 		var result := store.set_completion_through(number)
 		if result != OK:
 			_show_toast("Progress could not be saved: " + error_string(result))
@@ -1583,6 +1594,9 @@ func _input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 	if is_instance_valid(settings_layer):
+		return
+	# Keep Escape available, but disable debug and editor shortcuts in Web builds.
+	if OS.has_feature("web"):
 		return
 	var only_editor_keys := _only_keys([KEY_SHIFT, KEY_Z, KEY_O])
 	var only_color_keys := _only_keys([KEY_SHIFT, KEY_Z, KEY_I])
