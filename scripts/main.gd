@@ -14,6 +14,11 @@ const CogIcon = preload("res://assets/cog.svg")
 const PuzzleSolver = preload("res://scripts/puzzle_solver.gd")
 const UnsolvedGlowShader = preload("res://assets/unsolved_glow.gdshader")
 const SCREEN_TRANSITION_DURATION := 0.2
+const CommunityHub = preload("res://scripts/community_hub.gd")
+const COMMUNITY_RESUME := "user://community_resume.save"
+var community_hub: Control
+var community_hidden: Array[CanvasItem] = []
+var community_previous_process: Dictionary = {}
 
 const BG := Color("0c1219")
 const PANEL := Color("141e28")
@@ -162,6 +167,20 @@ func _ready() -> void:
 		play_level(1)
 	else:
 		show_menu()
+	var resume := LevelStore._read_json(COMMUNITY_RESUME)
+	if resume.get("screen") == "play" and resume.get("path") is Array:
+		var level_number := clampi(int(resume.get("level", 1)), 1, LevelStore.VICTORY_LEVEL)
+		var layout := store.get_level(level_number)
+		var route: Array = []
+		for cell in resume.path:
+			if not (cell is int or cell is float) or not Puzzle.can_append(route, int(cell), layout.width, layout.height):
+				break
+			route.append(int(cell))
+		play_level(level_number, route)
+	elif resume.get("screen") == "menu":
+		show_menu()
+	if not resume.is_empty():
+		DirAccess.remove_absolute(COMMUNITY_RESUME)
 
 func _update_menu_columns() -> void:
 	if not is_instance_valid(menu_rows):
@@ -567,6 +586,7 @@ func _shell(restore_menu: bool = false) -> void:
 	_set_background_for_level(editor_level if screen == "editor" else (current_level if screen == "play" else (menu_hovered_level if menu_hovered_level > 0 else store.frontier())))
 	if restore_menu:
 		_restore_saved_menu()
+		_build_footer()
 		return
 	active_shell = Control.new()
 	active_shell.theme = palette_theme
@@ -595,6 +615,102 @@ func _shell(restore_menu: bool = false) -> void:
 	else:
 		active_shell.add_child(_create_status_bar())
 		_position_play_credits()
+	_build_footer()
+
+func _build_footer() -> void:
+	var footer := HBoxContainer.new()
+	footer.name = "CommunityFooter"
+	footer.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+	footer.offset_top = -16
+	footer.offset_bottom = 0
+	footer.add_theme_constant_override("separation", 0)
+	for text in ["Discord", "Donate", "Custom Levels"]:
+		var link := Button.new()
+		link.text = text
+		link.focus_mode = Control.FOCUS_NONE
+		link.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		link.custom_minimum_size.y = 16
+		link.add_theme_font_override("font", ThemeDB.fallback_font)
+		link.add_theme_font_size_override("font_size", 11)
+		for state in ["normal", "hover", "pressed", "focus"]:
+			var style := StyleBoxFlat.new()
+			style.bg_color = Color("233440") if state == "hover" else PANEL
+			style.content_margin_top = 0
+			style.content_margin_bottom = 0
+			link.add_theme_stylebox_override(state, style)
+		link.pressed.connect(func():
+			match text:
+				"Discord": OS.shell_open("https://discord.gg/dCmMS2Rhep")
+				"Donate": OS.shell_open("https://ko-fi.com/snugglefox")
+				_: _open_custom_levels()
+		)
+		footer.add_child(link)
+	add_child(footer)
+
+func _open_custom_levels() -> void:
+	if is_instance_valid(community_hub):
+		return
+	if is_instance_valid(board) and board.has_node("VictoryPulse"):
+		return
+	_close_settings()
+	_finish_screen_transition()
+	pressed_keys.clear()
+	chord_active = false
+	pending_undo = false
+	if screen_shake_tween and screen_shake_tween.is_running():
+		screen_shake_tween.kill()
+	position = Vector2.ZERO
+	if is_instance_valid(board):
+		board._end()
+	var snapshot := {"screen": screen, "level": current_level, "path": board.path.duplicate() if is_instance_valid(board) else [], "locked": board.locked if is_instance_valid(board) else false}
+	var result := store.save_progress()
+	if result == OK:
+		result = LevelStore._atomic_write(COMMUNITY_RESUME, snapshot)
+	if result != OK:
+		_show_toast("Game could not be saved")
+		return
+	community_hidden.clear()
+	community_previous_process.clear()
+	for child in get_children():
+		if child == game_audio:
+			continue
+		community_previous_process[child] = child.process_mode
+		child.process_mode = Node.PROCESS_MODE_DISABLED
+		if child is CanvasItem and child.visible:
+			community_hidden.append(child)
+	set_process(false)
+	set_process_input(false)
+	community_hub = CommunityHub.new()
+	community_hub.theme = palette_theme.duplicate(true)
+	community_hub.campaign_background = background_rect.color
+	community_hub.audio = game_audio
+	community_hub.closed.connect(_close_custom_levels)
+	add_child(community_hub)
+	game_audio.set_music_active(true)
+
+func _close_custom_levels() -> void:
+	var snapshot := LevelStore._read_json(COMMUNITY_RESUME)
+	remove_child(community_hub)
+	community_hub.queue_free()
+	community_hub = null
+	for child in community_previous_process:
+		if is_instance_valid(child):
+			child.process_mode = community_previous_process[child]
+	for child in community_hidden:
+		if is_instance_valid(child):
+			child.show()
+	community_hidden.clear()
+	community_previous_process.clear()
+	if is_instance_valid(board) and snapshot.get("path") is Array:
+		board.path.clear()
+		for cell in snapshot.path:
+			board.path.append(int(cell))
+		board.locked = bool(snapshot.get("locked", false))
+		board.refresh()
+	DirAccess.remove_absolute(COMMUNITY_RESUME)
+	set_process(true)
+	set_process_input(true)
+	game_audio.set_music_active(screen != "menu")
 
 func show_menu() -> void:
 	_finish_screen_transition()
@@ -1164,7 +1280,7 @@ func play_level(number: int, restore: Array = [], navigation_direction: int = 0)
 	board.configure(level, tint, store.get_line_color(number))
 	board.path = restore.duplicate()
 	board.refresh()
-	board.solved.connect(_complete_level)
+	board.solved.connect(func(): _complete_level(true))
 	board.line_tile_added.connect(game_audio.play_click)
 	board.line_tile_removed.connect(game_audio.play_place)
 	var controls := HBoxContainer.new()
@@ -1299,6 +1415,10 @@ func _create_status_bar() -> HBoxContainer:
 	settings_button.custom_minimum_size = Vector2(48, 48)
 	settings_button.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	status_bar.add_child(settings_button)
+	var custom := button("Custom Levels", _open_custom_levels)
+	custom.name = "CustomLevelsButton"
+	custom.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	status_bar.add_child(custom)
 	status_bar.minimum_size_changed.connect(_position_play_credits)
 	return status_bar
 
@@ -1495,7 +1615,7 @@ func _animate_level_background(previous: Color, target: Color, duration: float =
 	background_tween.tween_property(background_rect, "color", target, duration).set_trans(Tween.TRANS_SINE)
 	background_tween.tween_property(panel_style, "bg_color", target, duration).set_trans(Tween.TRANS_SINE)
 
-func _complete_level() -> void:
+func _complete_level(animate: bool = false) -> void:
 	if current_level == LevelStore.VICTORY_LEVEL or is_instance_valid(completion_layer):
 		return
 	game_audio.play_victory()
@@ -1509,6 +1629,12 @@ func _complete_level() -> void:
 	if result != OK:
 		_show_toast("Progress could not be saved: " + error_string(result))
 	var tint := store.get_color(current_level)
+	if animate and is_instance_valid(board):
+		var solved_board := board
+		var solved_level := current_level
+		await VictoryPulse.play(board)
+		if not is_inside_tree() or not is_instance_valid(solved_board) or board != solved_board or current_level != solved_level or screen != "play":
+			return
 	var layer := Control.new()
 	completion_layer = layer
 	layer.theme = palette_theme
@@ -1567,6 +1693,8 @@ func _complete_level() -> void:
 		tween.finished.connect(spark.queue_free)
 
 func _input(event: InputEvent) -> void:
+	if is_instance_valid(community_hub):
+		return
 	if event is InputEventMouseMotion and menu_drag_source > 0:
 		_update_menu_drag(event.position)
 		return
@@ -1760,6 +1888,7 @@ func _show_editor() -> void:
 	board.paint_started.connect(func(): stroke_before = editor_data.duplicate(true))
 	board.cell_painted.connect(_paint_cell)
 	board.light_painted.connect(_paint_light_cell)
+	board.cell_sampled.connect(func(cell: int): _set_brush(int(editor_data.tiles[cell])))
 	board.paint_finished.connect(_finish_stroke)
 	var controls_scroll := ScrollContainer.new()
 	controls_scroll.custom_minimum_size.x = 245

@@ -15,6 +15,7 @@ signal solved
 signal paint_started
 signal cell_painted(cell: int)
 signal light_painted(cell: int)
+signal cell_sampled(cell: int)
 signal paint_finished
 
 var width := 3
@@ -28,6 +29,7 @@ var locked := false
 var dragging := false
 var right_dragging := false
 var hovered := -1
+var brush_preview := -1
 var previous_pointer := Vector2.ZERO
 var line_group: CanvasGroup
 var line_shadow: Line2D
@@ -385,6 +387,13 @@ func _draw_tiles(canvas: CanvasItem) -> void:
 		var style: StyleBoxFlat = animated_tile_styles.get(cell, tile_styles[int(rendered_values[cell])])
 		canvas.draw_style_box(style, tile_rects[cell])
 	if hovered >= 0 and hovered < tile_rects.size() and not locked:
+		if editing and brush_preview in [0, 1, 2]:
+			var preview := tile_styles[0 if right_dragging else brush_preview].duplicate() as StyleBoxFlat
+			preview.bg_color.a = 0.7
+			preview.shadow_size = 0
+			preview.set_border_width_all(1)
+			preview.border_color = Color(1, 1, 1, 0.85)
+			canvas.draw_style_box(preview, tile_rects[hovered])
 		canvas.draw_style_box(tile_hover_style, tile_rects[hovered])
 
 static func line_color(color: Color) -> Color:
@@ -444,6 +453,12 @@ static func balanced_color(hue: float, saturation: float, brightness: float) -> 
 
 func _gui_input(event: InputEvent) -> void:
 	if locked:
+		return
+	if editing and event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_MIDDLE and event.pressed:
+		var sampled := cell_at(event.position)
+		if sampled >= 0:
+			cell_sampled.emit(sampled)
+		accept_event()
 		return
 	if editing and event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
 		if event.pressed:
@@ -602,6 +617,8 @@ func _end_light() -> void:
 	if right_dragging:
 		paint_finished.emit()
 	right_dragging = false
+	if editing and brush_preview >= 0:
+		_redraw_tiles()
 
 func _changed() -> void:
 	refresh(true)

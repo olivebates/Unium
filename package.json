@@ -1,0 +1,20 @@
+{
+  "name": "hearthline-community",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/community_backend.test.mjs && vitest run tests/community_convex.test.ts",
+    "typecheck": "tsc --noEmit",
+    "convex:dev": "convex dev --env-file convex.env",
+    "convex:deploy": "convex dev --once --env-file convex.env"
+  },
+  "dependencies": {
+    "convex": "^1.31.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "convex-test": "^0.0.67",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.0"
+  }
+}

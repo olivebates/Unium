@@ -489,7 +489,15 @@ func save_levels() -> Error:
 static func _read_json(path: String) -> Dictionary:
 	if not FileAccess.file_exists(path):
 		return {}
-	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(path))
+	var bytes := FileAccess.get_file_as_bytes(path)
+	if bytes.size() >= 8 and bytes.slice(0, 4).get_string_from_ascii() == "HLZ1":
+		var length := bytes.decode_u32(4)
+		if length < 1 or length > 16777216:
+			return {}
+		bytes = bytes.slice(8).decompress(length, FileAccess.COMPRESSION_DEFLATE)
+		if bytes.size() != length:
+			return {}
+	var parsed: Variant = JSON.parse_string(bytes.get_string_from_utf8())
 	return parsed if parsed is Dictionary else {}
 
 static func _atomic_write(path: String, value: Dictionary) -> Error:
@@ -497,7 +505,13 @@ static func _atomic_write(path: String, value: Dictionary) -> Error:
 	var file := FileAccess.open(temporary, FileAccess.WRITE)
 	if file == null:
 		return FileAccess.get_open_error()
-	file.store_string(JSON.stringify(value, "  ") + "\n")
+	if path.begins_with("user://"):
+		var raw := JSON.stringify(value).to_utf8_buffer()
+		file.store_buffer("HLZ1".to_ascii_buffer())
+		file.store_32(raw.size())
+		file.store_buffer(raw.compress(FileAccess.COMPRESSION_DEFLATE))
+	else:
+		file.store_string(JSON.stringify(value, "  ") + "\n")
 	file.flush()
 	file.close()
 	return DirAccess.rename_absolute(temporary, path)

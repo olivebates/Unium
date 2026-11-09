@@ -581,6 +581,8 @@ func run() -> void:
 	await process_frame
 	await process_frame
 	check(is_instance_valid(main.completed_badge) and main.completed_badge.is_visible_in_tree() and main.completed_badge.size == Vector2(72, 72) and main.completed_badge.get_global_rect().end.x <= main.credit_display.get_global_rect().position.x, "Solving shows a large completion badge to the left of the credits")
+	check(main.completion_layer == null, "Victory animation runs before the end dialog")
+	await create_timer(1.05).timeout
 	var celebration_text: Array = main.find_children("", "Label", true, false).map(func(node): return node.text)
 	check("Level 2 complete!" in celebration_text and celebration_text.any(func(line): return line.ends_with("!") and (line.trim_suffix("!") + ".") in CelebrationLines.LINES), "Celebration chooses a short exclamation")
 	var praise_labels: Array = main.find_children("", "Label", true, false).filter(func(node): return node.text.ends_with("!") and (node.text.trim_suffix("!") + ".") in CelebrationLines.LINES)

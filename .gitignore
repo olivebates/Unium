@@ -3,3 +3,5 @@
 /android/
 .test-user/
 *.tmp
+node_modules/
+.env.local

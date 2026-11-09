@@ -42,7 +42,7 @@ func run() -> void:
 	check(main.find_children("", "Label", true, false).any(func(node): return node.text == "Congradulations on completing all the levels!"), "Victory preserves the requested heading")
 	var body: RichTextLabel = main.find_child("VictoryMessage", true, false)
 	check(body.get_parsed_text() == main.VICTORY_MESSAGE + "\n" + main.VICTORY_DISCORD and body.meta_clicked.is_connected(main._open_victory_link), "The requested invitation contains a clickable Discord link")
-	var buttons: Array = main.active_shell.find_children("", "Button", true, false).filter(func(node): return node.name != "SettingsButton")
+	var buttons: Array = main.active_shell.find_children("", "Button", true, false).filter(func(node): return node.name not in ["SettingsButton", "CustomLevelsButton"])
 	check(buttons.size() == 2 and buttons[0].text == "Back to Puzzle Selection" and buttons[1].text.contains("Previous puzzle"), "Victory offers selection and previous navigation")
 	var credits: int = main.store.credits
 	main._complete_level()
