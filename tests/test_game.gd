@@ -15,6 +15,9 @@ func check(condition: bool, message: String) -> void:
 		push_error(message)
 
 func run() -> void:
+	root.mode = Window.MODE_WINDOWED
+	root.size = Vector2i(1120, 820)
+	await process_frame
 	var started := Time.get_ticks_msec()
 	var generated_crossings := 0
 	var generated_layouts: Dictionary = {}
@@ -225,7 +228,7 @@ func run() -> void:
 	check(main.palette_theme.get_color("font_color", "Label").is_equal_approx(PuzzleBoard.text_color(main.store.get_color(1))), "Play text uses the first split-complementary hue")
 	check((main.palette_theme.get_stylebox("normal", "Button") as StyleBoxFlat).bg_color.is_equal_approx(PuzzleBoard.button_color(main.store.get_color(1))), "Secondary buttons use the subdued split-complementary hue")
 	check(main.palette_theme.get_color("font_shadow_color", "Label").a > 0.0, "Text has a shadow")
-	check(ProjectSettings.get_setting("display/window/stretch/mode") == "canvas_items" and ProjectSettings.get_setting("display/window/stretch/aspect") == "expand", "Game layout stretches to fill fullscreen")
+	check(ProjectSettings.get_setting("display/window/stretch/mode") == "canvas_items" and ProjectSettings.get_setting("display/window/stretch/aspect") == "expand", "GUI scales proportionally to fill the window")
 	var play_controls := main.content.get_child(2) as HBoxContainer
 	check(play_controls.get_child_count() == 5 and (play_controls.get_child(0) as Button).text == "▦ All puzzles" and play_controls.get_child(1).size_flags_horizontal == Control.SIZE_EXPAND_FILL and (play_controls.get_child(2) as Button).text == "← Previous puzzle" and (play_controls.get_child(3) as Button).text == "↻ Reset line" and (play_controls.get_child(4) as Button).text == "Skip →", "Grid button returns to puzzles and navigation buttons align at the right")
 	check(main.background_rect.color == PuzzleBoard.background_color(main.store.get_color(1)), "Entire play screen uses the level background")
@@ -681,7 +684,7 @@ func run() -> void:
 	check(main.background_rect.color == PuzzleBoard.menu_background_color(main.store.get_color(6)), "Menu defaults to the current unsolved level's main hue")
 	check(main.palette_text.is_equal_approx(PuzzleBoard.menu_text_color(main.store.get_color(6))) and main.palette_button.is_equal_approx(PuzzleBoard.menu_button_color(main.store.get_color(6))), "Menu text and buttons use the selected level's main hue")
 	var level_cards: Array[Button] = main.menu_cards.duplicate()
-	check(level_cards.size() == 10 and (main.menu_hint.get_child(0) as Label).text == "?" and main.menu_rows.get_child(0).get_child(10) == main.menu_hint, "The next locked group is hinted after the unlocked cards")
+	check(level_cards.size() == 10 and (main.menu_hint.get_child(0) as Label).text == "?" and main.menu_rows.get_child(1).get_child(0) == main.menu_hint, "The next locked group follows a full row of ten levels")
 	var hint_style := main.menu_hint.get_theme_stylebox("panel") as StyleBoxFlat
 	check(hint_style.border_width_left == 2 and hint_style.border_color == main.LOCKED_HINT_OUTLINE and main.menu_hint.mouse_filter == Control.MOUSE_FILTER_STOP, "Locked group hint has a red outline and accepts clicks")
 	main.menu_hint.mouse_entered.emit()
@@ -706,7 +709,7 @@ func run() -> void:
 	check(main.position == Vector2.ZERO, "A second screen shake also returns to its original position")
 	check(not level_cards.is_empty() and level_cards[0].size == Vector2(64, 64), "Menu level cards are 64 by 64")
 	check(level_cards.all(func(node): return node.tooltip_text.is_empty()), "Level cards do not show hover popups")
-	check(main.menu_rows.get_child_count() == 1 and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_BEGIN, "Menu rows align their cards from the left")
+	check(main.menu_rows.get_child_count() == 2 and main.menu_rows.get_children().all(func(row): return row.get_child_count() <= 10 and row.alignment == BoxContainer.ALIGNMENT_BEGIN), "Menu rows align left and contain at most ten items")
 	check(main.content.get_child(0) is HBoxContainer and main.credit_label.text == str(main.store.credits), "Credits replace Play beside the menu title")
 	check((main.content.get_child(0) as HBoxContainer).get_child(0).text == "H e a r t h l i n e", "Cozy menu title has spaced letters")
 	check((main.content.get_child(0) as HBoxContainer).get_child(2) == main.status_bar and main.credit_display.get_index() < main.settings_button.get_index(), "Menu credit display sits to the left of settings at the top right")
@@ -887,7 +890,7 @@ func run() -> void:
 	key(main, KEY_M, true, false, true)
 	check(main.store.frontier() == 100 and main.store.completed.has("99"), "Shift+Z+M completes and unlocks the first 99 levels")
 	var menu_scroll: ScrollContainer = main.menu_scroll
-	check(main.menu_cards.size() == 101 and main.menu_columns <= 15 and main.menu_rows.get_child_count() == ceili(101.0 / main.menu_columns) and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_BEGIN and menu_scroll.vertical_scroll_mode == ScrollContainer.SCROLL_MODE_SHOW_ALWAYS and main.menu_hint == null, "Menu ends at the victory card without promising further puzzles")
+	check(main.menu_cards.size() == 101 and main.menu_columns == 10 and main.menu_rows.get_child_count() == ceili(101.0 / main.menu_columns) and (main.menu_rows.get_child(0) as HBoxContainer).alignment == BoxContainer.ALIGNMENT_BEGIN and menu_scroll.vertical_scroll_mode == ScrollContainer.SCROLL_MODE_SHOW_ALWAYS and main.menu_hint == null, "Menu has ten columns and ends at the victory card")
 	check(main.credit_label.text == str(main.store.credits), "Unlock shortcut refreshes the menu credits")
 	key(main, KEY_M, false, false, true)
 	key(main, KEY_Z, false, false, true)

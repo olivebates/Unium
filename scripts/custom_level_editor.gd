@@ -79,11 +79,17 @@ func _ready() -> void:
 	for side in ["left", "right", "top", "bottom"]:
 		bar_margins.add_theme_constant_override("margin_" + side, 16)
 	bar.add_child(bar_margins)
+	var bar_scroll := ScrollContainer.new()
+	bar_scroll.name = "EditorBarScroll"
+	bar_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	bar_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	bar_margins.add_child(bar_scroll)
 	var rows := HBoxContainer.new()
 	rows.name = "EditorBar"
+	rows.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	rows.alignment = BoxContainer.ALIGNMENT_END
 	rows.add_theme_constant_override("separation", 6)
-	bar_margins.add_child(rows)
+	bar_scroll.add_child(rows)
 	tools = HBoxContainer.new()
 	tools.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	tools.size_flags_vertical = Control.SIZE_SHRINK_CENTER

@@ -41,6 +41,7 @@ var pending := false
 var campaign_background := Color("0c1219")
 var audio: Node
 var browser_panel: PanelContainer
+var browser_gui: Control
 var vote_score: Label
 var winning := false
 var replay_render_index := -2
@@ -54,6 +55,10 @@ var play_actions: HBoxContainer
 const VOTE_ARROW = preload("res://assets/community_upvote.svg")
 const VOTE_ORANGE := Color("ff8a3d")
 const REPLAY_MOVE_MS := 200.0
+# The global interface is 75% of its former size; selector contents use
+# another 2/3 so they end up at 50%, with the window's space kept available.
+const GLOBAL_GUI_SCALE := 0.75
+const SELECTOR_GUI_SCALE := 0.5 / GLOBAL_GUI_SCALE
 
 func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -118,8 +123,11 @@ func _close_dialog(dialog: CommunityDialog, previous: CommunityDialog = null) ->
 
 func _fit_browser_panel() -> void:
 	if is_instance_valid(browser_panel):
-		browser_panel.size = Vector2(minf(960, size.x - 64), minf(660, size.y - 64))
+		browser_panel.size = Vector2(minf(960 / GLOBAL_GUI_SCALE, size.x - 64 / GLOBAL_GUI_SCALE), minf(660 / GLOBAL_GUI_SCALE, size.y - 64 / GLOBAL_GUI_SCALE))
 		browser_panel.position = (size - browser_panel.size) * 0.5
+		if is_instance_valid(browser_gui):
+			browser_gui.scale = Vector2.ONE * SELECTOR_GUI_SCALE
+			browser_gui.size = browser_panel.size / SELECTOR_GUI_SCALE
 
 func _button(text: String, callback: Callable) -> Button:
 	var result := Button.new()
@@ -155,6 +163,7 @@ func _clear(next_view: String) -> void:
 	editor = null
 	modal = null
 	browser_panel = null
+	browser_gui = null
 	more_button = null
 	replay_more_button = null
 	editor_button = null
@@ -175,8 +184,15 @@ func _clear(next_view: String) -> void:
 		browser_panel.name = "CustomLevelsWindow"
 		browser_panel.add_theme_stylebox_override("panel", CommunityDialog.surface(campaign_background))
 		add_child(browser_panel)
+		# Containers reset the scale of direct children. Keep an unscaled
+		# host so layout and pointer coordinates use the smaller GUI correctly.
+		var host := Control.new()
+		browser_panel.add_child(host)
+		browser_gui = Control.new()
+		browser_gui.name = "SelectorGui"
+		host.add_child(browser_gui)
 		_fit_browser_panel()
-		parent = browser_panel
+		parent = browser_gui
 	var margins := MarginContainer.new()
 	margins.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	for side in ["left", "right", "top", "bottom"]:

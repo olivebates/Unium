@@ -22,6 +22,9 @@ func check(value: bool, message: String) -> void:
 		push_error(message)
 
 func run() -> void:
+	root.mode = Window.MODE_WINDOWED
+	root.size = Vector2i(1120, 820)
+	await process_frame
 	CustomLevelEditor.clear_saved_draft()
 	var initial_preferences := ConfigFile.new()
 	initial_preferences.load(CommunityService.IDENTITY_PATH)
@@ -182,7 +185,7 @@ func run() -> void:
 	for control in [editor.palette[0], editor.width_input, editor.height_input, editor.color_input, editor.export_button, editor.import_button, editor.play_button]:
 		check(control.size.y >= 34, "Editor control has its original height: " + str(control.size))
 		check(absf(control.get_global_rect().get_center().y - editor.palette[0].get_global_rect().get_center().y) <= 1, "Editor controls share one vertical center")
-	check(editor_bar.get_global_rect().end.x <= editor.size.x - 16, "Editor controls fit within the padded bar")
+	check(editor_bar.get_parent().get_global_rect().end.x <= editor.size.x - 16, "Editor toolbar viewport fits within the padded bar")
 	for swatch in editor.palette + [editor.color_input]:
 		check(swatch.size.x == swatch.size.y and swatch.get_theme_stylebox("normal").corner_radius_top_left > 0, "Palette and color picker are rounded squares")
 	check(editor.color_input.find_child("ColorPickerIcon", true, false) != null, "Color picker has its own icon")

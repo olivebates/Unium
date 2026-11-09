@@ -29,7 +29,7 @@ const UNFINISHED_OUTLINE := Color("eae345")
 const COMPLETED_CARD_OUTLINE := Color("60d98d")
 const LOCKED_HINT_OUTLINE := Color("ed5b61")
 const NO_SOLUTION_OUTLINE := Color("f05462")
-const MENU_MAX_COLUMNS := 15
+const MENU_MAX_COLUMNS := 10
 
 var store := LevelStore.new()
 var game_audio: Node
@@ -162,6 +162,8 @@ func _ready() -> void:
 	resized.connect(func():
 		_finish_screen_transition()
 		_update_menu_columns()
+		_update_window_margins()
+		_position_play_credits()
 	)
 	if store.completed.is_empty():
 		play_level(1)
@@ -181,6 +183,19 @@ func _ready() -> void:
 		show_menu()
 	if not resume.is_empty():
 		DirAccess.remove_absolute(COMMUNITY_RESUME)
+
+func _window_side_margin() -> int:
+	return 16 if size.x < 1000 else 44
+
+func _update_window_margins() -> void:
+	if not is_instance_valid(active_shell):
+		return
+	var margins := active_shell.get_node_or_null("WindowMargins") as MarginContainer
+	if margins:
+		for side in ["left", "right"]:
+			margins.add_theme_constant_override("margin_" + side, _window_side_margin())
+		for side in ["top", "bottom"]:
+			margins.add_theme_constant_override("margin_" + side, 12 if size.y < 600 else 28)
 
 func _update_menu_columns() -> void:
 	if not is_instance_valid(menu_rows):
@@ -593,11 +608,12 @@ func _shell(restore_menu: bool = false) -> void:
 	active_shell.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(active_shell)
 	var margins := MarginContainer.new()
+	margins.name = "WindowMargins"
 	margins.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	for side in ["left", "right"]:
-		margins.add_theme_constant_override("margin_" + side, 44)
+		margins.add_theme_constant_override("margin_" + side, _window_side_margin())
 	for side in ["top", "bottom"]:
-		margins.add_theme_constant_override("margin_" + side, 28)
+		margins.add_theme_constant_override("margin_" + side, 12 if size.y < 600 else 28)
 	active_shell.add_child(margins)
 	content = VBoxContainer.new()
 	content.add_theme_constant_override("separation", 22)
@@ -1271,7 +1287,7 @@ func play_level(number: int, restore: Array = [], navigation_direction: int = 0)
 	panel.add_theme_stylebox_override("panel", box(PuzzleBoard.background_color(tint), 24))
 	content.add_child(panel)
 	var play_area := Control.new()
-	play_area.custom_minimum_size = Vector2(340, 320)
+	play_area.custom_minimum_size = Vector2(100, 100)
 	panel.add_child(play_area)
 	board = PuzzleBoard.new()
 	board.show_start_finish = number == 1
@@ -1396,8 +1412,8 @@ func _position_play_credits() -> void:
 	if not is_instance_valid(status_bar) or screen == "menu":
 		return
 	status_bar.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-	status_bar.offset_left = -44 - status_bar.get_combined_minimum_size().x
-	status_bar.offset_right = -44
+	status_bar.offset_left = -_window_side_margin() - status_bar.get_combined_minimum_size().x
+	status_bar.offset_right = -_window_side_margin()
 	status_bar.offset_top = 20
 	status_bar.offset_bottom = 92
 

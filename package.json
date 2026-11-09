@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --experimental-strip-types --test tests/community_backend.test.mjs && vitest run tests/community_convex.test.ts",
+    "test": "node --experimental-strip-types --test tests/community_backend.test.mjs tests/web_embed.test.mjs && vitest run tests/community_convex.test.ts",
     "typecheck": "tsc --noEmit",
     "convex:dev": "convex dev --env-file convex.env",
     "convex:deploy": "convex dev --once --env-file convex.env"

@@ -22,10 +22,10 @@ func _ready() -> void:
 		var notice_seen: Variant = JavaScriptBridge.eval("(() => { try { return localStorage.getItem('hearthline_custom_levels_notice_seen') === '1'; } catch (_) { return false; } })()")
 		# Web builds can return a JavaScript boolean as an integer Variant.
 		custom_levels_notice_seen = custom_levels_notice_seen or bool(notice_seen)
-		var cookie: Variant = JavaScriptBridge.eval("document.cookie.split('; ').find(s => s.startsWith('hearthline_owner='))?.split('=')[1] || ''")
+		var cookie: Variant = JavaScriptBridge.eval("(() => { try { return document.cookie.split('; ').find(s => s.startsWith('hearthline_owner='))?.split('=')[1] || ''; } catch (_) { return ''; } })()")
 		if cookie is String and cookie.length() == 64 and cookie.is_valid_hex_number(false):
 			token = cookie
-		var ids: Variant = JavaScriptBridge.eval("decodeURIComponent(document.cookie.split('; ').find(s => s.startsWith('hearthline_levels='))?.split('=')[1] || '%5B%5D')")
+		var ids: Variant = JavaScriptBridge.eval("(() => { try { return decodeURIComponent(document.cookie.split('; ').find(s => s.startsWith('hearthline_levels='))?.split('=')[1] || '%5B%5D'); } catch (_) { return '[]'; } })()")
 		if ids is String:
 			var parsed: Variant = JSON.parse_string(ids)
 			if parsed is Array:
@@ -45,10 +45,10 @@ func _save_identity() -> void:
 		JavaScriptBridge.eval("try { localStorage.setItem('hearthline_publish_available_at', '" + str(publish_available_at_ms) + "'); } catch (_) {}")
 		if custom_levels_notice_seen:
 			JavaScriptBridge.eval("try { localStorage.setItem('hearthline_custom_levels_notice_seen', '1'); } catch (_) {}")
-		JavaScriptBridge.eval("document.cookie = 'hearthline_owner=" + token + "; Max-Age=31536000; Path=/; SameSite=Lax; Secure'")
+		JavaScriptBridge.eval("try { document.cookie = 'hearthline_owner=" + token + "; Max-Age=31536000; Path=/; SameSite=Lax; Secure'; } catch (_) {}")
 		# Ownership itself is the token. IDs only control owner buttons locally.
 		var ids := JSON.stringify(owned.slice(maxi(0, owned.size() - 80)))
-		JavaScriptBridge.eval("document.cookie = 'hearthline_levels=' + encodeURIComponent(" + JSON.stringify(ids) + ") + '; Max-Age=31536000; Path=/; SameSite=Lax; Secure'")
+		JavaScriptBridge.eval("try { document.cookie = 'hearthline_levels=' + encodeURIComponent(" + JSON.stringify(ids) + ") + '; Max-Age=31536000; Path=/; SameSite=Lax; Secure'; } catch (_) {}")
 
 func remember_custom_levels_notice() -> void:
 	custom_levels_notice_seen = true
